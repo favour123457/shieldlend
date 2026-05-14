@@ -108,7 +108,9 @@ export function solToLamports(sol) {
 }
 
 export function formatSOL(lamports) {
-  return (Number(lamports) / 1e9).toFixed(4);
+  if (lamports === null || lamports === undefined) return "—";
+  const value = typeof lamports?.toString === "function" ? lamports.toString() : lamports;
+  return `${(Number(value) / 1e9).toFixed(4)} SOL`;
 }
 
 export function randomComputationOffset() {

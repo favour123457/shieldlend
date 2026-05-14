@@ -1,15 +1,16 @@
-
-
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::{program::invoke_signed, system_instruction};
+use anchor_lang::solana_program::{
+    program::{invoke, invoke_signed},
+    system_instruction,
+};
 use arcium_anchor::prelude::*;
 use arcium_client::idl::arcium::types::CircuitSource;
 use arcium_client::idl::arcium::types::OffChainCircuitSource;
 
 // ── Comp def offsets derived from circuit function names ──────────────────────
 const COMP_DEF_OFFSET_CHECK_LIQUIDATABLE: u32 = comp_def_offset("check_liquidatable");
-const COMP_DEF_OFFSET_APPLY_INTEREST: u32     = comp_def_offset("apply_interest");
-const COMP_DEF_OFFSET_VALIDATE_BORROW: u32    = comp_def_offset("validate_borrow");
+const COMP_DEF_OFFSET_APPLY_INTEREST: u32 = comp_def_offset("apply_interest");
+const COMP_DEF_OFFSET_VALIDATE_BORROW: u32 = comp_def_offset("validate_borrow");
 
 declare_id!("FY16NSWTr4EX5XhVDkk5xut4MHY95AfhLbWjMmYnfodK");
 
@@ -33,9 +34,7 @@ pub mod shieldlend {
         Ok(())
     }
 
-    pub fn init_apply_interest_comp_def(
-        ctx: Context<InitApplyInterestCompDef>,
-    ) -> Result<()> {
+    pub fn init_apply_interest_comp_def(ctx: Context<InitApplyInterestCompDef>) -> Result<()> {
         init_comp_def(
             ctx.accounts,
             Some(CircuitSource::OffChain(OffChainCircuitSource {
@@ -50,9 +49,7 @@ pub mod shieldlend {
         Ok(())
     }
 
-    pub fn init_validate_borrow_comp_def(
-        ctx: Context<InitValidateBorrowCompDef>,
-    ) -> Result<()> {
+    pub fn init_validate_borrow_comp_def(ctx: Context<InitValidateBorrowCompDef>) -> Result<()> {
         init_comp_def(
             ctx.accounts,
             Some(CircuitSource::OffChain(OffChainCircuitSource {
@@ -69,10 +66,10 @@ pub mod shieldlend {
     pub fn check_liquidatable(
         ctx: Context<CheckLiquidatable>,
         computation_offset: u64,
-        collateral: [u8; 32],        // encrypted u64 field of LiquidatableInput
-        borrow: [u8; 32],            // encrypted u64 field of LiquidatableInput
-        ltv_threshold_bps: u64,      // plaintext
-        pubkey: [u8; 32],            // x25519 pubkey for result re-encryption
+        collateral: [u8; 32],   // encrypted u64 field of LiquidatableInput
+        borrow: [u8; 32],       // encrypted u64 field of LiquidatableInput
+        ltv_threshold_bps: u64, // plaintext
+        pubkey: [u8; 32],       // x25519 pubkey for result re-encryption
         nonce: u128,
     ) -> Result<()> {
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
@@ -103,10 +100,10 @@ pub mod shieldlend {
     pub fn apply_interest(
         ctx: Context<ApplyInterest>,
         computation_offset: u64,
-        collateral: [u8; 32],        // encrypted u64
-        borrow: [u8; 32],            // encrypted u64
-        interest_rate_bps: u64,      // plaintext
-        time_slots: u64,             // plaintext
+        collateral: [u8; 32],   // encrypted u64
+        borrow: [u8; 32],       // encrypted u64
+        interest_rate_bps: u64, // plaintext
+        time_slots: u64,        // plaintext
         pubkey: [u8; 32],
         nonce: u128,
     ) -> Result<()> {
@@ -139,10 +136,10 @@ pub mod shieldlend {
     pub fn validate_borrow(
         ctx: Context<ValidateBorrow>,
         computation_offset: u64,
-        collateral: [u8; 32],        // encrypted u64
-        existing_borrow: [u8; 32],   // encrypted u64
-        requested_borrow: [u8; 32],  // encrypted u64
-        max_ltv_bps: u64,            // plaintext
+        collateral: [u8; 32],       // encrypted u64
+        existing_borrow: [u8; 32],  // encrypted u64
+        requested_borrow: [u8; 32], // encrypted u64
+        max_ltv_bps: u64,           // plaintext
         pubkey: [u8; 32],
         nonce: u128,
     ) -> Result<()> {
@@ -172,15 +169,77 @@ pub mod shieldlend {
         Ok(())
     }
 
-    // ── Vault transfer after successful frontend MPC validation ───────────────
-    //
-    // This instruction demonstrates program-controlled vault payout. The frontend
-    // calls this only after validate_borrow returns true from Arcium MPC.
-    //
-    // Production note: the program should persist the MPC validation result in
-    // an on-chain position account before allowing this transfer.
-    pub fn borrow_payout(ctx: Context<BorrowPayout>, amount: u64) -> Result<()> {
+    // ── Protocol state + vault transfers ──────────────────────────────────────
+
+    pub fn deposit_collateral(
+        ctx: Context<DepositCollateral>,
+        amount: u64,
+        collateral_ciphertext: [u8; 32],
+    ) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidAmount);
+
+        let protocol = &mut ctx.accounts.protocol;
+        if protocol.authority == Pubkey::default() {
+            protocol.authority = ctx.accounts.depositor.key();
+            protocol.bump = ctx.bumps.protocol;
+        }
+
+        let position = &mut ctx.accounts.position;
+        if position.owner == Pubkey::default() {
+            position.owner = ctx.accounts.depositor.key();
+            position.bump = ctx.bumps.position;
+        }
+        require_keys_eq!(
+            position.owner,
+            ctx.accounts.depositor.key(),
+            ErrorCode::InvalidPositionOwner
+        );
+
+        invoke(
+            &system_instruction::transfer(
+                ctx.accounts.depositor.key,
+                ctx.accounts.vault.key,
+                amount,
+            ),
+            &[
+                ctx.accounts.depositor.to_account_info(),
+                ctx.accounts.vault.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+
+        position.collateral_lamports = position
+            .collateral_lamports
+            .checked_add(amount)
+            .ok_or(ErrorCode::MathOverflow)?;
+        position.collateral_ciphertext = collateral_ciphertext;
+        position.last_update_slot = Clock::get()?.slot;
+
+        protocol.total_deposits = protocol
+            .total_deposits
+            .checked_add(amount)
+            .ok_or(ErrorCode::MathOverflow)?;
+
+        emit!(DepositEvent {
+            depositor: ctx.accounts.depositor.key(),
+            amount,
+            vault: ctx.accounts.vault.key(),
+        });
+
+        Ok(())
+    }
+
+    pub fn borrow_payout(
+        ctx: Context<BorrowPayout>,
+        amount: u64,
+        borrow_ciphertext: [u8; 32],
+    ) -> Result<()> {
+        require!(amount > 0, ErrorCode::InvalidAmount);
+        require_keys_eq!(
+            ctx.accounts.position.owner,
+            ctx.accounts.borrower.key(),
+            ErrorCode::InvalidPositionOwner
+        );
 
         let vault_lamports = ctx.accounts.vault.to_account_info().lamports();
         require!(vault_lamports >= amount, ErrorCode::VaultInsufficientFunds);
@@ -202,9 +261,71 @@ pub mod shieldlend {
             &[signer_seeds],
         )?;
 
+        let protocol = &mut ctx.accounts.protocol;
+        let position = &mut ctx.accounts.position;
+        position.borrow_lamports = position
+            .borrow_lamports
+            .checked_add(amount)
+            .ok_or(ErrorCode::MathOverflow)?;
+        position.borrow_ciphertext = borrow_ciphertext;
+        position.last_update_slot = Clock::get()?.slot;
+
+        protocol.total_borrows = protocol
+            .total_borrows
+            .checked_add(amount)
+            .ok_or(ErrorCode::MathOverflow)?;
+
         emit!(BorrowPayoutEvent {
             borrower: ctx.accounts.borrower.key(),
             amount,
+        });
+
+        Ok(())
+    }
+
+    pub fn repay(ctx: Context<Repay>, amount: u64, borrow_ciphertext: [u8; 32]) -> Result<()> {
+        require!(amount > 0, ErrorCode::InvalidAmount);
+        require_keys_eq!(
+            ctx.accounts.position.owner,
+            ctx.accounts.borrower.key(),
+            ErrorCode::InvalidPositionOwner
+        );
+        require!(
+            ctx.accounts.position.borrow_lamports >= amount,
+            ErrorCode::RepayExceedsBorrow
+        );
+
+        invoke(
+            &system_instruction::transfer(
+                ctx.accounts.borrower.key,
+                ctx.accounts.vault.key,
+                amount,
+            ),
+            &[
+                ctx.accounts.borrower.to_account_info(),
+                ctx.accounts.vault.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+
+        let protocol = &mut ctx.accounts.protocol;
+        let position = &mut ctx.accounts.position;
+        position.borrow_lamports = position
+            .borrow_lamports
+            .checked_sub(amount)
+            .ok_or(ErrorCode::MathOverflow)?;
+        position.borrow_ciphertext = borrow_ciphertext;
+        position.last_update_slot = Clock::get()?.slot;
+
+        protocol.total_borrows = protocol
+            .total_borrows
+            .checked_sub(amount)
+            .ok_or(ErrorCode::MathOverflow)?;
+
+        emit!(RepayEvent {
+            borrower: ctx.accounts.borrower.key(),
+            amount,
+            remaining_borrow: position.borrow_lamports,
         });
 
         Ok(())
@@ -505,8 +626,69 @@ pub struct ValidateBorrow<'info> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Vault transfer account structs
+// Protocol state and vault transfer account structs
 // ═══════════════════════════════════════════════════════════════════════════
+
+#[account]
+pub struct ProtocolState {
+    pub authority: Pubkey,
+    pub total_deposits: u64,
+    pub total_borrows: u64,
+    pub bump: u8,
+}
+
+impl ProtocolState {
+    pub const INIT_SPACE: usize = 32 + 8 + 8 + 1;
+}
+
+#[account]
+pub struct UserPosition {
+    pub owner: Pubkey,
+    pub collateral_ciphertext: [u8; 32],
+    pub borrow_ciphertext: [u8; 32],
+    pub collateral_lamports: u64,
+    pub borrow_lamports: u64,
+    pub last_update_slot: u64,
+    pub bump: u8,
+}
+
+impl UserPosition {
+    pub const INIT_SPACE: usize = 32 + 32 + 32 + 8 + 8 + 8 + 1;
+}
+
+#[derive(Accounts)]
+pub struct DepositCollateral<'info> {
+    #[account(mut)]
+    pub depositor: Signer<'info>,
+
+    #[account(
+        init_if_needed,
+        payer = depositor,
+        space = 8 + ProtocolState::INIT_SPACE,
+        seeds = [b"protocol"],
+        bump,
+    )]
+    pub protocol: Account<'info, ProtocolState>,
+
+    #[account(
+        init_if_needed,
+        payer = depositor,
+        space = 8 + UserPosition::INIT_SPACE,
+        seeds = [b"position", depositor.key().as_ref()],
+        bump,
+    )]
+    pub position: Account<'info, UserPosition>,
+
+    #[account(
+        mut,
+        seeds = [b"vault"],
+        bump,
+    )]
+    /// CHECK: vault PDA holds SOL only and is controlled by program seeds.
+    pub vault: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
 
 #[derive(Accounts)]
 pub struct BorrowPayout<'info> {
@@ -515,10 +697,55 @@ pub struct BorrowPayout<'info> {
 
     #[account(
         mut,
+        seeds = [b"protocol"],
+        bump = protocol.bump,
+    )]
+    pub protocol: Account<'info, ProtocolState>,
+
+    #[account(
+        mut,
+        seeds = [b"position", borrower.key().as_ref()],
+        bump = position.bump,
+    )]
+    pub position: Account<'info, UserPosition>,
+
+    #[account(
+        mut,
         seeds = [b"vault"],
         bump,
     )]
-    pub vault: SystemAccount<'info>,
+    /// CHECK: vault PDA holds SOL only and is controlled by program seeds.
+    pub vault: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct Repay<'info> {
+    #[account(mut)]
+    pub borrower: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"protocol"],
+        bump = protocol.bump,
+    )]
+    pub protocol: Account<'info, ProtocolState>,
+
+    #[account(
+        mut,
+        seeds = [b"position", borrower.key().as_ref()],
+        bump = position.bump,
+    )]
+    pub position: Account<'info, UserPosition>,
+
+    #[account(
+        mut,
+        seeds = [b"vault"],
+        bump,
+    )]
+    /// CHECK: vault PDA holds SOL only and is controlled by program seeds.
+    pub vault: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
 }
@@ -601,7 +828,7 @@ pub struct ValidateBorrowCallback<'info> {
 
 #[event]
 pub struct LiquidatableResultEvent {
-    pub result: [u8; 32],  // encrypted: 1 = liquidatable, 0 = healthy
+    pub result: [u8; 32], // encrypted: 1 = liquidatable, 0 = healthy
     pub nonce: [u8; 16],
 }
 
@@ -614,14 +841,28 @@ pub struct InterestAppliedEvent {
 
 #[event]
 pub struct BorrowValidatedEvent {
-    pub result: [u8; 32],  // encrypted: 1 = valid, 0 = would breach LTV
+    pub result: [u8; 32], // encrypted: 1 = valid, 0 = would breach LTV
     pub nonce: [u8; 16],
+}
+
+#[event]
+pub struct DepositEvent {
+    pub depositor: Pubkey,
+    pub amount: u64,
+    pub vault: Pubkey,
 }
 
 #[event]
 pub struct BorrowPayoutEvent {
     pub borrower: Pubkey,
     pub amount: u64,
+}
+
+#[event]
+pub struct RepayEvent {
+    pub borrower: Pubkey,
+    pub amount: u64,
+    pub remaining_borrow: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -638,4 +879,10 @@ pub enum ErrorCode {
     InvalidAmount,
     #[msg("Vault does not have enough SOL for this payout")]
     VaultInsufficientFunds,
+    #[msg("Position account does not belong to this wallet")]
+    InvalidPositionOwner,
+    #[msg("Arithmetic overflow")]
+    MathOverflow,
+    #[msg("Repay amount exceeds current borrow")]
+    RepayExceedsBorrow,
 }

@@ -10,6 +10,12 @@ import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import { getProgram, fetchPosition, fetchProtocolState } from "../lib/program";
 import { formatCiphertext } from "../lib/arcium";
 
+function anchorNumberToNumber(value) {
+  if (value === null || value === undefined) return 0;
+  const raw = typeof value.toString === "function" ? value.toString() : value;
+  return Number(raw);
+}
+
 export function usePosition() {
   useConnection();
   const wallet = useWallet();
@@ -53,8 +59,8 @@ export function usePosition() {
       if (proto) {
         setProtocolState({
           ...proto,
-          totalDepositsSOL: Number(proto.totalDeposits) / 1e9,
-          totalBorrowsSOL: Number(proto.totalBorrows) / 1e9,
+          totalDepositsSOL: anchorNumberToNumber(proto.totalDeposits) / 1e9,
+          totalBorrowsSOL: anchorNumberToNumber(proto.totalBorrows) / 1e9,
         });
       }
     } catch (err) {

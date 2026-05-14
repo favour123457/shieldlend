@@ -12,8 +12,16 @@
 import { useState, useCallback } from "react";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import { BN } from "@coral-xyz/anchor";
-import { PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
-import { getProgram, getArciumAccounts, getCompDefAddress, getVaultAddress } from "../lib/program";
+import { PublicKey, SystemProgram } from "@solana/web3.js";
+import {
+  getProgram,
+  getArciumAccounts,
+  getCompDefAddress,
+  getVaultAddress,
+  getProtocolAddress,
+  getPositionAddress,
+  fetchPosition,
+} from "../lib/program";
 import {
   encryptAmount,
   encryptValues,
@@ -31,6 +39,15 @@ let localPosition = {
   collateralCipher: null,  // { ciphertext, nonce, privateKey, publicKey, sharedSecret }
   borrowCipher: null,
 };
+
+function anchorNumberToBigInt(value) {
+  if (value === null || value === undefined) return 0n;
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") return BigInt(value);
+  if (typeof value === "string") return BigInt(value);
+  if (typeof value.toString === "function") return BigInt(value.toString());
+  return 0n;
+}
 
 function waitForProgramEvent(program, eventName, log, timeoutMs = 120_000) {
   let listener = null;
@@ -116,6 +133,32 @@ export function useShieldLend() {
     }
   }, [log]);
 
+  const loadPositionFromChain = useCallback(async (program) => {
+    if (!wallet.publicKey) return null;
+
+    const position = await fetchPosition(program, wallet.publicKey);
+    if (position) {
+      localPosition.collateralLamports = anchorNumberToBigInt(position.collateralLamports);
+      localPosition.borrowLamports = anchorNumberToBigInt(position.borrowLamports);
+      localPosition.collateralCipher = {
+        ciphertext: position.collateralCiphertext,
+      };
+      localPosition.borrowCipher = {
+        ciphertext: position.borrowCiphertext,
+      };
+      log("Loaded on-chain ShieldLend position PDA", {
+        position: getPositionAddress(PROGRAM_ID, wallet.publicKey).toBase58(),
+        collateralLamports: localPosition.collateralLamports.toString(),
+        borrowLamports: localPosition.borrowLamports.toString(),
+      });
+    } else {
+      log("No on-chain ShieldLend position PDA found yet", {
+        position: getPositionAddress(PROGRAM_ID, wallet.publicKey).toBase58(),
+      });
+    }
+    return position;
+  }, [wallet.publicKey, log]);
+
   // ── Deposit collateral (encrypts + stores locally for demo) ────
   const depositCollateral = useCallback(async (amountSOL) => {
     if (!wallet.publicKey) throw new Error("Wallet not connected");
@@ -125,16 +168,19 @@ export function useShieldLend() {
     try {
       log("Deposit requested", { amountSOL });
       const { program } = getProgram(wallet);
+      await loadPositionFromChain(program);
       const balance = await connection.getBalance(wallet.publicKey, "confirmed");
       log("Read wallet balance from Solana RPC", { balanceLamports: balance });
 
       const mxePublicKey = await getMXEKey(program);
       const lamports = BigInt(Math.floor(amountSOL * 1_000_000_000));
+      const newCollateralLamports = localPosition.collateralLamports + lamports;
 
       setMpcStatus("encrypting");
-      const encrypted = await encryptAmount(lamports, mxePublicKey);
-      log("Encrypted collateral amount with Arcium RescueCipher", {
-        lamports: lamports.toString(),
+      const encrypted = await encryptAmount(newCollateralLamports, mxePublicKey);
+      log("Encrypted updated collateral total with Arcium RescueCipher", {
+        depositLamports: lamports.toString(),
+        newCollateralLamports: newCollateralLamports.toString(),
         ciphertextBytes: encrypted.ciphertext.length,
         nonce: encrypted.nonce.toString(),
         ephemeralPubkey: Array.from(encrypted.publicKey),
@@ -149,64 +195,46 @@ export function useShieldLend() {
         throw new Error("Wallet balance is too low for this deposit");
       }
 
-      const transaction = new Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey: wallet.publicKey,
-          toPubkey: vaultAddress,
-          lamports: transferLamports,
+      if (!program.methods.depositCollateral) {
+        throw new Error("The deployed ShieldLend IDL has no deposit_collateral instruction yet. Rebuild/redeploy and copy the new IDL.");
+      }
+
+      const protocolAddress = getProtocolAddress(PROGRAM_ID);
+      const positionAddress = getPositionAddress(PROGRAM_ID, wallet.publicKey);
+
+      log("Requesting wallet signature for on-chain deposit_collateral", {
+        depositor: wallet.publicKey.toBase58(),
+        protocol: protocolAddress.toBase58(),
+        position: positionAddress.toBase58(),
+        vault: vaultAddress.toBase58(),
+        depositLamports: lamports.toString(),
+        encryptedCollateralTotal: Array.from(encrypted.ciphertext).slice(0, 8),
+      });
+
+      const tx = await program.methods
+        .depositCollateral(new BN(lamports.toString()), Array.from(encrypted.ciphertext))
+        .accountsPartial({
+          depositor: wallet.publicKey,
+          protocol: protocolAddress,
+          position: positionAddress,
+          vault: vaultAddress,
+          systemProgram: SystemProgram.programId,
         })
-      );
-      transaction.feePayer = wallet.publicKey;
-      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
-      transaction.recentBlockhash = blockhash;
+        .rpc({ commitment: "confirmed" });
 
-      log("Simulating devnet SOL transfer to ShieldLend vault PDA", {
-        from: wallet.publicKey.toBase58(),
-        vault: vaultAddress.toBase58(),
-        lamports: transferLamports,
-        blockhash,
-      });
-      const simulation = await connection.simulateTransaction(transaction);
-      log("Deposit transfer simulation result", {
-        err: simulation.value.err,
-        logs: simulation.value.logs,
-        unitsConsumed: simulation.value.unitsConsumed,
-      });
-      if (simulation.value.err) {
-        throw new Error(`Deposit transfer simulation failed: ${JSON.stringify(simulation.value.err)}`);
-      }
-
-      log("Requesting wallet signature for devnet SOL deposit transfer", {
-        from: wallet.publicKey.toBase58(),
-        vault: vaultAddress.toBase58(),
-        lamports: transferLamports,
-      });
-      const tx = await wallet.sendTransaction(transaction, connection, {
-        preflightCommitment: "confirmed",
-      });
-      log("Submitted devnet SOL deposit transfer", { tx });
-
-      const confirmation = await connection.confirmTransaction(
-        { signature: tx, blockhash, lastValidBlockHeight },
-        "confirmed"
-      );
-      log("Confirmed devnet SOL deposit transfer", {
-        tx,
-        confirmationError: confirmation.value.err,
-      });
-      if (confirmation.value.err) {
-        throw new Error(`Deposit transfer confirmation failed: ${JSON.stringify(confirmation.value.err)}`);
-      }
-
-      localPosition.collateralLamports = lamports;
+      localPosition.collateralLamports = newCollateralLamports;
       localPosition.collateralCipher = encrypted;
 
       setMpcStatus("done");
-      log("Encrypted collateral and transferred SOL to vault PDA", {
+      log("On-chain deposit_collateral confirmed", {
         tx,
         vault: vaultAddress.toBase58(),
+        position: positionAddress.toBase58(),
+        protocol: protocolAddress.toBase58(),
+        depositLamports: lamports.toString(),
+        newCollateralLamports: newCollateralLamports.toString(),
         availableInstructions: program.idl.instructions.map((ix) => ix.name),
-        note: "The deployed program has no deposit instruction yet, so this is a direct devnet SOL transfer to the program-derived vault address plus client-side encrypted state.",
+        note: "Program transferred SOL into the vault PDA and updated the user's position PDA.",
       });
       return {
         success: true,
@@ -215,7 +243,8 @@ export function useShieldLend() {
         publicKey: encrypted.publicKey,
         tx,
         vault: vaultAddress.toBase58(),
-        note: "Encrypted with Arcium and transferred SOL to the ShieldLend vault PDA on devnet.",
+        position: positionAddress.toBase58(),
+        note: "Encrypted with Arcium, deposited through ShieldLend, and stored in the user's on-chain position PDA.",
       };
     } catch (err) {
       log("Deposit failed", { error: err.message });
@@ -225,12 +254,11 @@ export function useShieldLend() {
     } finally {
       setLoading(false);
     }
-  }, [wallet, connection, getMXEKey, log]);
+  }, [wallet, connection, getMXEKey, loadPositionFromChain, log]);
 
   // ── Validate borrow via Arcium MPC ────────────────────────────
   const queueBorrowValidation = useCallback(async (borrowSOL) => {
     if (!wallet.publicKey) throw new Error("Wallet not connected");
-    if (localPosition.collateralLamports === 0n) throw new Error("No collateral deposited");
 
     setLoading(true);
     setMpcStatus("encrypting");
@@ -241,6 +269,9 @@ export function useShieldLend() {
     try {
       log("Borrow validation requested", { borrowSOL });
       const { program } = getProgram(wallet);
+      await loadPositionFromChain(program);
+      if (localPosition.collateralLamports === 0n) throw new Error("No collateral deposited");
+
       const mxePublicKey = await getMXEKey(program);
 
       const borrowLamports = BigInt(Math.floor(borrowSOL * 1_000_000_000));
@@ -342,7 +373,7 @@ export function useShieldLend() {
     } finally {
       setLoading(false);
     }
-  }, [wallet, getMXEKey, log]);
+  }, [wallet, getMXEKey, loadPositionFromChain, log]);
 
   // ── Finalise borrow payout from the program-controlled vault PDA ─────────
   const finaliseBorrow = useCallback(async (borrowSOL, encRequested) => {
@@ -355,6 +386,7 @@ export function useShieldLend() {
     }
 
     const { program } = getProgram(wallet);
+    await loadPositionFromChain(program);
     const vaultAddress = getVaultAddress(PROGRAM_ID);
 
     if (!program.methods.borrowPayout) {
@@ -370,12 +402,23 @@ export function useShieldLend() {
       return null;
     }
 
+    const mxePublicKey = await getMXEKey(program);
+    const newBorrowLamports = localPosition.borrowLamports + lamports;
+    const encryptedBorrowTotal = await encryptAmount(newBorrowLamports, mxePublicKey);
+    const protocolAddress = getProtocolAddress(PROGRAM_ID);
+    const positionAddress = getPositionAddress(PROGRAM_ID, wallet.publicKey);
+
     const vaultBalance = await connection.getBalance(vaultAddress, "confirmed");
     log("Preparing borrow payout from ShieldLend vault PDA", {
       borrowSOL,
       borrowLamports: lamports.toString(),
+      newBorrowLamports: newBorrowLamports.toString(),
       vault: vaultAddress.toBase58(),
+      protocol: protocolAddress.toBase58(),
+      position: positionAddress.toBase58(),
       vaultBalanceLamports: vaultBalance,
+      validatedRequestedCipherPreview: Array.from(encRequested?.ciphertext || []).slice(0, 8),
+      storedBorrowCipherPreview: Array.from(encryptedBorrowTotal.ciphertext).slice(0, 8),
     });
 
     if (vaultBalance < payoutLamports) {
@@ -383,24 +426,28 @@ export function useShieldLend() {
     }
 
     const tx = await program.methods
-      .borrowPayout(new BN(lamports.toString()))
+      .borrowPayout(new BN(lamports.toString()), Array.from(encryptedBorrowTotal.ciphertext))
       .accountsPartial({
         borrower: wallet.publicKey,
+        protocol: protocolAddress,
+        position: positionAddress,
         vault: vaultAddress,
         systemProgram: SystemProgram.programId,
       })
       .rpc({ commitment: "confirmed" });
 
-    localPosition.borrowLamports += lamports;
-    localPosition.borrowCipher = encRequested;
+    localPosition.borrowLamports = newBorrowLamports;
+    localPosition.borrowCipher = encryptedBorrowTotal;
     log("Borrow payout transferred SOL from vault PDA", {
       tx,
       borrowSOL,
       borrowLamports: lamports.toString(),
+      newBorrowLamports: newBorrowLamports.toString(),
       vault: vaultAddress.toBase58(),
+      position: positionAddress.toBase58(),
     });
     return tx;
-  }, [wallet, connection, log]);
+  }, [wallet, connection, getMXEKey, loadPositionFromChain, log]);
 
   // ── Check liquidatable via Arcium MPC ─────────────────────────
   const checkLiquidatable = useCallback(async (targetAddress) => {
@@ -417,9 +464,19 @@ export function useShieldLend() {
       const { program } = getProgram(wallet);
       const mxePublicKey = await getMXEKey(program);
 
-      // For demo: use localPosition values; in prod fetch from target's PDA
-      const collateral = localPosition.collateralLamports || 1_000_000_000n;
-      const borrow = localPosition.borrowLamports || 0n;
+      let collateral = localPosition.collateralLamports || 1_000_000_000n;
+      let borrow = localPosition.borrowLamports || 0n;
+      const targetPosition = await fetchPosition(program, targetAddress);
+      if (targetPosition) {
+        collateral = anchorNumberToBigInt(targetPosition.collateralLamports);
+        borrow = anchorNumberToBigInt(targetPosition.borrowLamports);
+        log("Loaded target on-chain ShieldLend position PDA for liquidation check", {
+          targetAddress,
+          position: getPositionAddress(PROGRAM_ID, targetAddress).toBase58(),
+          collateralLamports: collateral.toString(),
+          borrowLamports: borrow.toString(),
+        });
+      }
 
       const encryptedInput = await encryptValues([collateral, borrow], mxePublicKey);
       const [encCollateral, encBorrow] = encryptedInput.ciphertexts;
@@ -503,17 +560,74 @@ export function useShieldLend() {
     }
   }, [wallet, getMXEKey, log]);
 
-  // ── Repay (updates local state for demo) ──────────────────────
+  // ── Repay borrow through the on-chain protocol state ──────────
   const repay = useCallback(async (repaySOL) => {
-    const lamports = BigInt(Math.floor(repaySOL * 1_000_000_000));
-    if (lamports > localPosition.borrowLamports) throw new Error("Repay amount exceeds borrow");
-    localPosition.borrowLamports -= lamports;
-    log("No repay instruction found in the ShieldLend IDL", {
-      repaySOL,
-      repayLamports: lamports.toString(),
-    });
-    return null;
-  }, [log]);
+    if (!wallet.publicKey) throw new Error("Wallet not connected");
+
+    setLoading(true);
+    setLastError(null);
+
+    try {
+      log("Repay requested", { repaySOL });
+      const { program } = getProgram(wallet);
+      await loadPositionFromChain(program);
+
+      if (!program.methods.repay) {
+        throw new Error("The deployed ShieldLend IDL has no repay instruction yet. Rebuild/redeploy and copy the new IDL.");
+      }
+
+      const lamports = BigInt(Math.floor(repaySOL * 1_000_000_000));
+      if (lamports <= 0n) throw new Error("Repay amount must be greater than zero");
+      if (lamports > localPosition.borrowLamports) throw new Error("Repay amount exceeds borrow");
+
+      const mxePublicKey = await getMXEKey(program);
+      const remainingBorrowLamports = localPosition.borrowLamports - lamports;
+      const encryptedBorrowTotal = await encryptAmount(remainingBorrowLamports, mxePublicKey);
+
+      const protocolAddress = getProtocolAddress(PROGRAM_ID);
+      const positionAddress = getPositionAddress(PROGRAM_ID, wallet.publicKey);
+      const vaultAddress = getVaultAddress(PROGRAM_ID);
+
+      log("Requesting wallet signature for on-chain repay", {
+        repaySOL,
+        repayLamports: lamports.toString(),
+        remainingBorrowLamports: remainingBorrowLamports.toString(),
+        protocol: protocolAddress.toBase58(),
+        position: positionAddress.toBase58(),
+        vault: vaultAddress.toBase58(),
+        encryptedRemainingBorrowPreview: Array.from(encryptedBorrowTotal.ciphertext).slice(0, 8),
+      });
+
+      const tx = await program.methods
+        .repay(new BN(lamports.toString()), Array.from(encryptedBorrowTotal.ciphertext))
+        .accountsPartial({
+          borrower: wallet.publicKey,
+          protocol: protocolAddress,
+          position: positionAddress,
+          vault: vaultAddress,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc({ commitment: "confirmed" });
+
+      localPosition.borrowLamports = remainingBorrowLamports;
+      localPosition.borrowCipher = encryptedBorrowTotal;
+
+      log("Repay confirmed on Solana", {
+        tx,
+        repayLamports: lamports.toString(),
+        remainingBorrowLamports: remainingBorrowLamports.toString(),
+        position: positionAddress.toBase58(),
+        vault: vaultAddress.toBase58(),
+      });
+      return tx;
+    } catch (err) {
+      log("Repay failed", { error: err.message });
+      setLastError(err.message);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, [wallet, getMXEKey, loadPositionFromChain, log]);
 
   // ── Get local position for display ────────────────────────────
   const getLocalPosition = useCallback(() => ({
