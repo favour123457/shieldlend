@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { INTEREST_RATE_BPS, MAX_LTV_BPS, RESERVE_FEE_BPS } from "../lib/constants";
 import { formatSOL } from "../lib/arcium";
 import { usePosition } from "../hooks/usePosition";
-import { useShieldLend } from "../hooks/useShieldLend";
+import { subscribeToShieldLendHistory } from "../hooks/useShieldLend";
 import { ArrowRight, ShieldLendMark, WalletIcon } from "./Icons";
 import { BorrowPanel, DepositPanel, LiquidatePanel, RepayPanel, WithdrawPanel } from "./Panels";
 import { GhostBtn, StatCard, WalletBalancePill } from "./ui";
@@ -12,9 +12,11 @@ import { GhostBtn, StatCard, WalletBalancePill } from "./ui";
 export default function ShieldLendApp() {
   const { connected } = useWallet();
   const { position, protocolState, refresh } = usePosition();
-  const { getRecentActions } = useShieldLend();
+  const [recentActions, setRecentActions] = useState([]);
   const [activeTab, setActiveTab] = useState("deposit");
   const [showApp, setShowApp] = useState(false);
+
+  useEffect(() => subscribeToShieldLendHistory(setRecentActions), []);
 
   const tabs = [
     { key: "deposit", label: "Deposit" },
@@ -69,8 +71,6 @@ export default function ShieldLendApp() {
       caption: "Higher is safer",
     },
   ];
-
-  const recentActions = getRecentActions();
 
   return (
     <div style={{

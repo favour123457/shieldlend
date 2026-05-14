@@ -42,6 +42,7 @@ let localPosition = {
 };
 
 let localHistory = [];
+const historyListeners = new Set();
 
 function addHistory(action, details) {
   localHistory = [
@@ -52,6 +53,13 @@ function addHistory(action, details) {
     },
     ...localHistory,
   ].slice(0, 10);
+  historyListeners.forEach((listener) => listener(localHistory));
+}
+
+export function subscribeToShieldLendHistory(listener) {
+  historyListeners.add(listener);
+  listener(localHistory);
+  return () => historyListeners.delete(listener);
 }
 
 function anchorNumberToBigInt(value) {
@@ -820,8 +828,6 @@ export function useShieldLend() {
     borrowCiphertext: localPosition.borrowCipher?.ciphertext,
   }), []);
 
-  const getRecentActions = useCallback(() => localHistory, []);
-
   return {
     loading,
     mpcStatus,
@@ -834,7 +840,6 @@ export function useShieldLend() {
     repay,
     withdrawCollateral,
     getLocalPosition,
-    getRecentActions,
     isIdle: mpcStatus === "idle",
     isRunning: ["encrypting", "queued", "computing", "timeout_warning"].includes(mpcStatus),
     isDone: mpcStatus === "done",
