@@ -11,6 +11,11 @@ use arcium_client::idl::arcium::types::OffChainCircuitSource;
 const COMP_DEF_OFFSET_CHECK_LIQUIDATABLE: u32 = comp_def_offset("check_liquidatable");
 const COMP_DEF_OFFSET_APPLY_INTEREST: u32 = comp_def_offset("apply_interest");
 const COMP_DEF_OFFSET_VALIDATE_BORROW: u32 = comp_def_offset("validate_borrow");
+const MAX_LTV_BPS: u64 = 7_500;
+const INTEREST_RATE_BPS: u64 = 500;
+const RESERVE_FEE_BPS: u64 = 1_000;
+const BPS_DENOMINATOR: u128 = 10_000;
+const SLOTS_PER_YEAR: u128 = 78_840_000;
 
 declare_id!("FY16NSWTr4EX5XhVDkk5xut4MHY95AfhLbWjMmYnfodK");
 
@@ -175,6 +180,7 @@ pub mod shieldlend {
         ctx: Context<DepositCollateral>,
         amount: u64,
         collateral_ciphertext: [u8; 32],
+        borrow_ciphertext: [u8; 32],
     ) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidAmount);
 
@@ -188,12 +194,14 @@ pub mod shieldlend {
         if position.owner == Pubkey::default() {
             position.owner = ctx.accounts.depositor.key();
             position.bump = ctx.bumps.position;
+            position.last_update_slot = Clock::get()?.slot;
         }
         require_keys_eq!(
             position.owner,
             ctx.accounts.depositor.key(),
             ErrorCode::InvalidPositionOwner
         );
+        let (interest_accrued, reserve_fee) = accrue_interest(position, protocol)?;
 
         invoke(
             &system_instruction::transfer(
@@ -213,7 +221,7 @@ pub mod shieldlend {
             .checked_add(amount)
             .ok_or(ErrorCode::MathOverflow)?;
         position.collateral_ciphertext = collateral_ciphertext;
-        position.last_update_slot = Clock::get()?.slot;
+        position.borrow_ciphertext = borrow_ciphertext;
 
         protocol.total_deposits = protocol
             .total_deposits
@@ -224,6 +232,8 @@ pub mod shieldlend {
             depositor: ctx.accounts.depositor.key(),
             amount,
             vault: ctx.accounts.vault.key(),
+            interest_accrued,
+            reserve_fee,
         });
 
         Ok(())
@@ -239,6 +249,18 @@ pub mod shieldlend {
             ctx.accounts.position.owner,
             ctx.accounts.borrower.key(),
             ErrorCode::InvalidPositionOwner
+        );
+
+        let protocol = &mut ctx.accounts.protocol;
+        let position = &mut ctx.accounts.position;
+        let (interest_accrued, reserve_fee) = accrue_interest(position, protocol)?;
+        let new_borrow_lamports = position
+            .borrow_lamports
+            .checked_add(amount)
+            .ok_or(ErrorCode::MathOverflow)?;
+        require!(
+            within_max_ltv(position.collateral_lamports, new_borrow_lamports),
+            ErrorCode::BorrowWouldBreachLtv
         );
 
         let vault_lamports = ctx.accounts.vault.to_account_info().lamports();
@@ -261,14 +283,8 @@ pub mod shieldlend {
             &[signer_seeds],
         )?;
 
-        let protocol = &mut ctx.accounts.protocol;
-        let position = &mut ctx.accounts.position;
-        position.borrow_lamports = position
-            .borrow_lamports
-            .checked_add(amount)
-            .ok_or(ErrorCode::MathOverflow)?;
+        position.borrow_lamports = new_borrow_lamports;
         position.borrow_ciphertext = borrow_ciphertext;
-        position.last_update_slot = Clock::get()?.slot;
 
         protocol.total_borrows = protocol
             .total_borrows
@@ -278,6 +294,9 @@ pub mod shieldlend {
         emit!(BorrowPayoutEvent {
             borrower: ctx.accounts.borrower.key(),
             amount,
+            new_borrow: position.borrow_lamports,
+            interest_accrued,
+            reserve_fee,
         });
 
         Ok(())
@@ -290,8 +309,12 @@ pub mod shieldlend {
             ctx.accounts.borrower.key(),
             ErrorCode::InvalidPositionOwner
         );
+
+        let protocol = &mut ctx.accounts.protocol;
+        let position = &mut ctx.accounts.position;
+        let (interest_accrued, reserve_fee) = accrue_interest(position, protocol)?;
         require!(
-            ctx.accounts.position.borrow_lamports >= amount,
+            position.borrow_lamports >= amount,
             ErrorCode::RepayExceedsBorrow
         );
 
@@ -308,14 +331,11 @@ pub mod shieldlend {
             ],
         )?;
 
-        let protocol = &mut ctx.accounts.protocol;
-        let position = &mut ctx.accounts.position;
         position.borrow_lamports = position
             .borrow_lamports
             .checked_sub(amount)
             .ok_or(ErrorCode::MathOverflow)?;
         position.borrow_ciphertext = borrow_ciphertext;
-        position.last_update_slot = Clock::get()?.slot;
 
         protocol.total_borrows = protocol
             .total_borrows
@@ -326,6 +346,74 @@ pub mod shieldlend {
             borrower: ctx.accounts.borrower.key(),
             amount,
             remaining_borrow: position.borrow_lamports,
+            interest_accrued,
+            reserve_fee,
+        });
+
+        Ok(())
+    }
+
+    pub fn withdraw_collateral(
+        ctx: Context<WithdrawCollateral>,
+        amount: u64,
+        collateral_ciphertext: [u8; 32],
+        borrow_ciphertext: [u8; 32],
+    ) -> Result<()> {
+        require!(amount > 0, ErrorCode::InvalidAmount);
+        require_keys_eq!(
+            ctx.accounts.position.owner,
+            ctx.accounts.owner.key(),
+            ErrorCode::InvalidPositionOwner
+        );
+
+        let protocol = &mut ctx.accounts.protocol;
+        let position = &mut ctx.accounts.position;
+        let (interest_accrued, reserve_fee) = accrue_interest(position, protocol)?;
+        require!(
+            position.collateral_lamports >= amount,
+            ErrorCode::WithdrawExceedsCollateral
+        );
+
+        let remaining_collateral = position
+            .collateral_lamports
+            .checked_sub(amount)
+            .ok_or(ErrorCode::MathOverflow)?;
+        require!(
+            within_max_ltv(remaining_collateral, position.borrow_lamports),
+            ErrorCode::WithdrawWouldBreachLtv
+        );
+
+        let vault_lamports = ctx.accounts.vault.to_account_info().lamports();
+        require!(vault_lamports >= amount, ErrorCode::VaultInsufficientFunds);
+
+        let vault_bump = ctx.bumps.vault;
+        let signer_seeds: &[&[u8]] = &[b"vault", &[vault_bump]];
+
+        invoke_signed(
+            &system_instruction::transfer(ctx.accounts.vault.key, ctx.accounts.owner.key, amount),
+            &[
+                ctx.accounts.vault.to_account_info(),
+                ctx.accounts.owner.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+            &[signer_seeds],
+        )?;
+
+        position.collateral_lamports = remaining_collateral;
+        position.collateral_ciphertext = collateral_ciphertext;
+        position.borrow_ciphertext = borrow_ciphertext;
+
+        protocol.total_deposits = protocol
+            .total_deposits
+            .checked_sub(amount)
+            .ok_or(ErrorCode::MathOverflow)?;
+
+        emit!(WithdrawEvent {
+            owner: ctx.accounts.owner.key(),
+            amount,
+            remaining_collateral,
+            interest_accrued,
+            reserve_fee,
         });
 
         Ok(())
@@ -750,6 +838,36 @@ pub struct Repay<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+pub struct WithdrawCollateral<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(
+        mut,
+        seeds = [b"protocol"],
+        bump = protocol.bump,
+    )]
+    pub protocol: Account<'info, ProtocolState>,
+
+    #[account(
+        mut,
+        seeds = [b"position", owner.key().as_ref()],
+        bump = position.bump,
+    )]
+    pub position: Account<'info, UserPosition>,
+
+    #[account(
+        mut,
+        seeds = [b"vault"],
+        bump,
+    )]
+    /// CHECK: vault PDA holds SOL only and is controlled by program seeds.
+    pub vault: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Callback Account Structs
 // Required: arcium_program, comp_def_account, mxe_account,
@@ -850,12 +968,17 @@ pub struct DepositEvent {
     pub depositor: Pubkey,
     pub amount: u64,
     pub vault: Pubkey,
+    pub interest_accrued: u64,
+    pub reserve_fee: u64,
 }
 
 #[event]
 pub struct BorrowPayoutEvent {
     pub borrower: Pubkey,
     pub amount: u64,
+    pub new_borrow: u64,
+    pub interest_accrued: u64,
+    pub reserve_fee: u64,
 }
 
 #[event]
@@ -863,6 +986,17 @@ pub struct RepayEvent {
     pub borrower: Pubkey,
     pub amount: u64,
     pub remaining_borrow: u64,
+    pub interest_accrued: u64,
+    pub reserve_fee: u64,
+}
+
+#[event]
+pub struct WithdrawEvent {
+    pub owner: Pubkey,
+    pub amount: u64,
+    pub remaining_collateral: u64,
+    pub interest_accrued: u64,
+    pub reserve_fee: u64,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -885,4 +1019,73 @@ pub enum ErrorCode {
     MathOverflow,
     #[msg("Repay amount exceeds current borrow")]
     RepayExceedsBorrow,
+    #[msg("Borrow would exceed the maximum LTV")]
+    BorrowWouldBreachLtv,
+    #[msg("Withdraw amount exceeds current collateral")]
+    WithdrawExceedsCollateral,
+    #[msg("Withdraw would exceed the maximum LTV")]
+    WithdrawWouldBreachLtv,
+}
+
+fn within_max_ltv(collateral_lamports: u64, borrow_lamports: u64) -> bool {
+    if borrow_lamports == 0 {
+        return true;
+    }
+    if collateral_lamports == 0 {
+        return false;
+    }
+
+    (borrow_lamports as u128).saturating_mul(BPS_DENOMINATOR)
+        <= (collateral_lamports as u128).saturating_mul(MAX_LTV_BPS as u128)
+}
+
+fn accrue_interest(
+    position: &mut Account<UserPosition>,
+    protocol: &mut Account<ProtocolState>,
+) -> Result<(u64, u64)> {
+    let current_slot = Clock::get()?.slot;
+    if position.last_update_slot == 0 {
+        position.last_update_slot = current_slot;
+        return Ok((0, 0));
+    }
+
+    if position.borrow_lamports == 0 || current_slot <= position.last_update_slot {
+        position.last_update_slot = current_slot;
+        return Ok((0, 0));
+    }
+
+    let elapsed_slots = current_slot
+        .checked_sub(position.last_update_slot)
+        .ok_or(ErrorCode::MathOverflow)?;
+    let interest = (position.borrow_lamports as u128)
+        .checked_mul(INTEREST_RATE_BPS as u128)
+        .ok_or(ErrorCode::MathOverflow)?
+        .checked_mul(elapsed_slots as u128)
+        .ok_or(ErrorCode::MathOverflow)?
+        .checked_div(BPS_DENOMINATOR)
+        .ok_or(ErrorCode::MathOverflow)?
+        .checked_div(SLOTS_PER_YEAR)
+        .ok_or(ErrorCode::MathOverflow)? as u64;
+
+    if interest > 0 {
+        let reserve_fee = (interest as u128)
+            .checked_mul(RESERVE_FEE_BPS as u128)
+            .ok_or(ErrorCode::MathOverflow)?
+            .checked_div(BPS_DENOMINATOR)
+            .ok_or(ErrorCode::MathOverflow)? as u64;
+
+        position.borrow_lamports = position
+            .borrow_lamports
+            .checked_add(interest)
+            .ok_or(ErrorCode::MathOverflow)?;
+        protocol.total_borrows = protocol
+            .total_borrows
+            .checked_add(interest)
+            .ok_or(ErrorCode::MathOverflow)?;
+        position.last_update_slot = current_slot;
+        return Ok((interest, reserve_fee));
+    }
+
+    position.last_update_slot = current_slot;
+    Ok((0, 0))
 }

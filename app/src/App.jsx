@@ -7,6 +7,9 @@ import { RPC_URL } from "./lib/constants";
 import { useShieldLend } from "./hooks/useShieldLend";
 import { usePosition } from "./hooks/usePosition";
 import { formatSOL } from "./lib/arcium";
+import { INTEREST_RATE_BPS, LIQ_THRESHOLD_BPS, MAX_LTV_BPS, RESERVE_FEE_BPS } from "./lib/constants";
+
+const lamportsToSolNumber = (lamports) => Number(lamports || 0) / 1e9;
 
 // ── Icons ────────────────────────────────────────────────────
 const Shield = () => (
@@ -259,12 +262,13 @@ function DepositPanel({ onSuccess }) {
 }
 
 // ── Borrow Panel ──────────────────────────────────────────────
-function BorrowPanel({ onSuccess }) {
+function BorrowPanel({ position, onSuccess }) {
   const { publicKey } = useWallet();
   const { queueBorrowValidation, finaliseBorrow } = useShieldLend();
   const [amount, setAmount] = useState("");
   const [stage, setStage] = useState("idle"); // idle | validating | done | rejected
   const [error, setError] = useState(null);
+  const availableBorrowSOL = position ? lamportsToSolNumber(position.availableBorrowLamports) : 0;
 
   const handleBorrow = async () => {
     if (!amount || !publicKey) return;
@@ -321,10 +325,28 @@ function BorrowPanel({ onSuccess }) {
           Borrow Amount
         </label>
         <AmountInput value={amount} onChange={setAmount} disabled={stage === "validating"} />
+        {position && (
+          <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center", justifyContent: "space-between" }}>
+            <span style={{ fontSize: 11, color: "#4d7c5e", fontFamily: "'Space Mono', monospace" }}>
+              Available: {availableBorrowSOL.toFixed(4)} SOL
+            </span>
+            <button onClick={() => setAmount(availableBorrowSOL.toFixed(4))} style={{
+              padding: "6px 14px", background: "transparent",
+              border: "1px solid rgba(0,196,79,0.2)", borderRadius: 6,
+              color: "#86efac", fontSize: 11, cursor: "pointer",
+              fontFamily: "'Space Mono', monospace",
+            }}>Max</button>
+          </div>
+        )}
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-        {[["Max LTV", "75%"], ["Liq. Threshold", "80%"], ["Borrow APR", "5.00%"], ["Circuit", "validate_borrow"]].map(([k, v]) => (
+        {[
+          ["Max LTV", `${Number(MAX_LTV_BPS) / 100}%`],
+          ["Liq. Threshold", `${Number(LIQ_THRESHOLD_BPS) / 100}%`],
+          ["Borrow APR", `${Number(INTEREST_RATE_BPS) / 100}%`],
+          ["Circuit", "validate_borrow"],
+        ].map(([k, v]) => (
           <div key={k} style={{ padding: "14px 16px", background: "rgba(0,0,0,0.3)", borderRadius: 10, border: "1px solid rgba(0,196,79,0.1)" }}>
             <div style={{ fontSize: 10, color: "#4d7c5e", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6, fontFamily: "'Space Mono', monospace" }}>{k}</div>
             <div style={{ fontSize: 15, color: "#86efac", fontWeight: 700, fontFamily: "'Space Mono', monospace" }}>{v}</div>
@@ -357,6 +379,12 @@ function RepayPanel({ position, onSuccess }) {
   const [error, setError] = useState(null);
 
   const hasBorrow = Boolean(position?.borrowLamports && BigInt(position.borrowLamports.toString()) > 0n);
+  const borrowSOL = position ? lamportsToSolNumber(position.borrowLamportsNumber) : 0;
+
+  const setRepayPercent = (pct) => {
+    if (!borrowSOL) return;
+    setAmount((borrowSOL * pct).toFixed(4));
+  };
 
   const handleRepay = async () => {
     if (!amount || !publicKey) return;
@@ -402,9 +430,25 @@ function RepayPanel({ position, onSuccess }) {
           Repay Amount
         </label>
         <AmountInput value={amount} onChange={setAmount} disabled={stage === "repaying" || !hasBorrow} />
+        {hasBorrow && (
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            {[
+              ["25%", 0.25],
+              ["50%", 0.5],
+              ["100%", 1],
+            ].map(([label, pct]) => (
+              <button key={label} onClick={() => setRepayPercent(pct)} style={{
+                padding: "6px 14px", background: "transparent",
+                border: "1px solid rgba(0,196,79,0.2)", borderRadius: 6,
+                color: "#4d7c5e", fontSize: 11, cursor: "pointer",
+                fontFamily: "'Space Mono', monospace",
+              }}>{label}</button>
+            ))}
+          </div>
+        )}
       </div>
 
-      <PrivacyNotice text="Repay sends SOL back into the vault PDA, updates your position PDA, and stores a fresh encrypted borrow-balance ciphertext." />
+      <PrivacyNotice text="Repay first accounts for slot-based borrow interest, then sends SOL back into the vault PDA and stores a fresh encrypted borrow-balance ciphertext." />
 
       {!publicKey ? (
         <div style={{ textAlign: "center", padding: "16px", color: "#4d7c5e", fontSize: 13, border: "1px dashed rgba(0,196,79,0.2)", borderRadius: 10 }}>
@@ -413,6 +457,93 @@ function RepayPanel({ position, onSuccess }) {
       ) : (
         <PrimaryBtn onClick={handleRepay} disabled={!amount || Number(amount) <= 0 || stage === "repaying" || !hasBorrow} loading={stage === "repaying"}>
           Repay Borrow
+        </PrimaryBtn>
+      )}
+    </div>
+  );
+}
+
+// ── Withdraw Panel ───────────────────────────────────────────
+function WithdrawPanel({ position, onSuccess }) {
+  const { publicKey } = useWallet();
+  const { withdrawCollateral } = useShieldLend();
+  const [amount, setAmount] = useState("");
+  const [stage, setStage] = useState("idle");
+  const [tx, setTx] = useState(null);
+  const [error, setError] = useState(null);
+
+  const hasCollateral = Boolean(position?.collateralLamports && BigInt(position.collateralLamports.toString()) > 0n);
+  const availableWithdrawSOL = !position
+    ? 0
+    : position.borrowLamportsNumber === 0
+      ? lamportsToSolNumber(position.collateralLamportsNumber)
+      : Math.max(
+          0,
+          lamportsToSolNumber(position.collateralLamportsNumber - Math.ceil((position.borrowLamportsNumber * 10_000) / Number(MAX_LTV_BPS)))
+        );
+
+  const handleWithdraw = async () => {
+    if (!amount || !publicKey) return;
+    setError(null);
+    setTx(null);
+    setStage("withdrawing");
+    try {
+      const signature = await withdrawCollateral(Number(amount));
+      console.log("[ShieldLend UI] Withdraw result", { tx: signature, amountSOL: Number(amount) });
+      setTx(signature);
+      setStage("done");
+      onSuccess?.();
+    } catch (err) {
+      console.error("[ShieldLend UI] Withdraw failed", err);
+      setError(err.message || "Withdraw failed");
+      setStage("idle");
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {stage === "done" && (
+        <div style={{ padding: "20px", borderRadius: 12, background: "rgba(0,196,79,0.08)", border: "1px solid rgba(0,196,79,0.4)", textAlign: "center" }}>
+          <div style={{ color: "#00c44f", fontSize: 15, fontWeight: 700, marginBottom: 6 }}>Withdraw Confirmed</div>
+          <div style={{ color: "#4d7c5e", fontSize: 12, wordBreak: "break-all" }}>{tx}</div>
+        </div>
+      )}
+
+      {error && (
+        <div style={{ padding: "16px", borderRadius: 10, background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.35)", color: "#ef4444", fontSize: 12, fontFamily: "'Space Mono', monospace" }}>
+          {error}
+        </div>
+      )}
+
+      <div>
+        <label style={{ display: "block", fontSize: 11, color: "#4d7c5e", letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: 10, fontFamily: "'Space Mono', monospace" }}>
+          Withdraw Amount
+        </label>
+        <AmountInput value={amount} onChange={setAmount} disabled={stage === "withdrawing" || !hasCollateral} />
+        {hasCollateral && (
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 10 }}>
+            <span style={{ fontSize: 11, color: "#4d7c5e", fontFamily: "'Space Mono', monospace" }}>
+              Available: {availableWithdrawSOL.toFixed(4)} SOL
+            </span>
+            <button onClick={() => setAmount(availableWithdrawSOL.toFixed(4))} style={{
+              padding: "6px 14px", background: "transparent",
+              border: "1px solid rgba(0,196,79,0.2)", borderRadius: 6,
+              color: "#86efac", fontSize: 11, cursor: "pointer",
+              fontFamily: "'Space Mono', monospace",
+            }}>Max</button>
+          </div>
+        )}
+      </div>
+
+      <PrivacyNotice text="Withdrawals are only allowed when the remaining collateral keeps the position inside the max LTV limit." />
+
+      {!publicKey ? (
+        <div style={{ textAlign: "center", padding: "16px", color: "#4d7c5e", fontSize: 13, border: "1px dashed rgba(0,196,79,0.2)", borderRadius: 10 }}>
+          Connect your wallet to withdraw
+        </div>
+      ) : (
+        <PrimaryBtn onClick={handleWithdraw} disabled={!amount || Number(amount) <= 0 || stage === "withdrawing" || !hasCollateral} loading={stage === "withdrawing"}>
+          Withdraw Collateral
         </PrimaryBtn>
       )}
     </div>
@@ -537,6 +668,7 @@ function LiquidatePanel() {
 function ShieldLendApp() {
   const { connected } = useWallet();
   const { position, protocolState, refresh } = usePosition();
+  const { getRecentActions } = useShieldLend();
   const [activeTab, setActiveTab] = useState("deposit");
   const [showApp, setShowApp] = useState(false);
 
@@ -544,24 +676,38 @@ function ShieldLendApp() {
     { key: "deposit", label: "Deposit" },
     { key: "borrow", label: "Borrow" },
     { key: "repay", label: "Repay" },
+    { key: "withdraw", label: "Withdraw" },
     { key: "liquidate", label: "Liquidate" },
   ];
+
+  const healthLabel = !position || position.borrowLamportsNumber === 0
+    ? "No debt"
+    : position.healthFactor >= 1.5
+      ? "Healthy"
+      : position.healthFactor >= 1.1
+        ? "Watch"
+        : "Risky";
 
   const positionRows = position
     ? [
         ["Collateral", formatSOL(position.collateralLamports)],
         ["Borrow", formatSOL(position.borrowLamports)],
+        ["Available", formatSOL(position.availableBorrowLamports)],
+        ["LTV", `${(position.ltvBps / 100).toFixed(2)}%`],
+        ["Health", position.healthFactor === Infinity ? "∞" : position.healthFactor.toFixed(2)],
         ["Last Slot", position.lastUpdateSlot?.toString?.() || "—"],
-        ["Status", position.borrowLamports?.toString?.() === "0" ? "No debt" : "Active"],
+        ["Status", healthLabel],
       ]
-    : [["Collateral", "—"], ["Borrow", "—"], ["Last Slot", "—"], ["Status", "—"]];
+    : [["Collateral", "—"], ["Borrow", "—"], ["Available", "—"], ["LTV", "—"], ["Health", "—"], ["Last Slot", "—"], ["Status", "—"]];
 
   const protocolRows = [
     ["Total Deposits", protocolState ? `${protocolState.totalDepositsSOL.toFixed(4)} SOL` : "—"],
     ["Total Borrows", protocolState ? `${protocolState.totalBorrowsSOL.toFixed(4)} SOL` : "—"],
-    ["APR", "5.00%"],
-    ["Max LTV", "75%"],
+    ["Reserve Fee", `${Number(RESERVE_FEE_BPS) / 100}% interest`],
+    ["APR", `${Number(INTEREST_RATE_BPS) / 100}%`],
+    ["Max LTV", `${Number(MAX_LTV_BPS) / 100}%`],
   ];
+  const recentActions = getRecentActions();
 
   return (
     <div style={{
@@ -764,19 +910,22 @@ function ShieldLendApp() {
                       {activeTab === "deposit" && "Deposit Collateral"}
                       {activeTab === "borrow" && "Borrow Against Collateral"}
                       {activeTab === "repay" && "Repay Borrow"}
+                      {activeTab === "withdraw" && "Withdraw Collateral"}
                       {activeTab === "liquidate" && "Liquidation Check"}
                     </h2>
                     <p style={{ fontSize: 13, color: "#4d7c5e", margin: 0 }}>
                       {activeTab === "deposit" && "Encrypted client-side before hitting Solana"}
                       {activeTab === "borrow" && "MPC validates LTV — no plaintext exposed"}
                       {activeTab === "repay" && "Transfer SOL back into the vault and update your position PDA"}
+                      {activeTab === "withdraw" && "Return collateral only when your position remains healthy"}
                       {activeTab === "liquidate" && "Privacy-preserving health factor check"}
                     </p>
                   </div>
 
                   {activeTab === "deposit" && <DepositPanel onSuccess={refresh} />}
-                  {activeTab === "borrow" && <BorrowPanel onSuccess={refresh} />}
+                  {activeTab === "borrow" && <BorrowPanel position={position} onSuccess={refresh} />}
                   {activeTab === "repay" && <RepayPanel position={position} onSuccess={refresh} />}
+                  {activeTab === "withdraw" && <WithdrawPanel position={position} onSuccess={refresh} />}
                   {activeTab === "liquidate" && <LiquidatePanel />}
                 </div>
               </div>
@@ -838,6 +987,28 @@ function ShieldLendApp() {
                       <div key={c} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: "1px solid rgba(0,196,79,0.06)" }}>
                         <Check size={12} style={{ color: "#00c44f" }} />
                         <span style={{ fontSize: 11, color: "#86efac", fontFamily: "'Space Mono', monospace" }}>{c}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Activity */}
+                <div style={{ background: "rgba(0,196,79,0.03)", border: "1px solid rgba(0,196,79,0.15)", borderRadius: 16, overflow: "hidden" }}>
+                  <div style={{ padding: "18px 24px", borderBottom: "1px solid rgba(0,196,79,0.12)" }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#f0fdf4" }}>Recent Activity</span>
+                  </div>
+                  <div style={{ padding: "12px 24px", display: "flex", flexDirection: "column", gap: 8 }}>
+                    {recentActions.length === 0 ? (
+                      <div style={{ fontSize: 12, color: "#4d7c5e" }}>No actions this session</div>
+                    ) : recentActions.slice(0, 5).map((item) => (
+                      <div key={`${item.action}-${item.at}`} style={{ padding: "10px 0", borderBottom: "1px solid rgba(0,196,79,0.06)" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 4 }}>
+                          <span style={{ fontSize: 11, color: "#86efac", fontFamily: "'Space Mono', monospace" }}>{item.action}</span>
+                          <span style={{ fontSize: 11, color: "#4d7c5e", fontFamily: "'Space Mono', monospace" }}>{item.amountSOL} SOL</span>
+                        </div>
+                        <div style={{ fontSize: 10, color: "#2d4a35", fontFamily: "'Space Mono', monospace", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {item.tx}
+                        </div>
                       </div>
                     ))}
                   </div>

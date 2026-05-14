@@ -590,6 +590,15 @@
               32
             ]
           }
+        },
+        {
+          "name": "borrow_ciphertext",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
         }
       ]
     },
@@ -1027,6 +1036,118 @@
           }
         }
       ]
+    },
+    {
+      "name": "withdraw_collateral",
+      "discriminator": [
+        115,
+        135,
+        168,
+        106,
+        139,
+        214,
+        138,
+        150
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "protocol",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  114,
+                  111,
+                  116,
+                  111,
+                  99,
+                  111,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111,
+                  115,
+                  105,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        },
+        {
+          "name": "collateral_ciphertext",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "borrow_ciphertext",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
     }
   ],
   "accounts": [
@@ -1213,6 +1334,19 @@
         82,
         140
       ]
+    },
+    {
+      "name": "WithdrawEvent",
+      "discriminator": [
+        22,
+        9,
+        133,
+        26,
+        160,
+        44,
+        71,
+        192
+      ]
     }
   ],
   "errors": [
@@ -1250,6 +1384,21 @@
       "code": 6006,
       "name": "RepayExceedsBorrow",
       "msg": "Repay amount exceeds current borrow"
+    },
+    {
+      "code": 6007,
+      "name": "BorrowWouldBreachLtv",
+      "msg": "Borrow would exceed the maximum LTV"
+    },
+    {
+      "code": 6008,
+      "name": "WithdrawExceedsCollateral",
+      "msg": "Withdraw amount exceeds current collateral"
+    },
+    {
+      "code": 6009,
+      "name": "WithdrawWouldBreachLtv",
+      "msg": "Withdraw would exceed the maximum LTV"
     }
   ],
   "types": [
@@ -1340,6 +1489,18 @@
           },
           {
             "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "new_borrow",
+            "type": "u64"
+          },
+          {
+            "name": "interest_accrued",
+            "type": "u64"
+          },
+          {
+            "name": "reserve_fee",
             "type": "u64"
           }
         ]
@@ -1684,6 +1845,14 @@
           {
             "name": "vault",
             "type": "pubkey"
+          },
+          {
+            "name": "interest_accrued",
+            "type": "u64"
+          },
+          {
+            "name": "reserve_fee",
+            "type": "u64"
           }
         ]
       }
@@ -2139,6 +2308,14 @@
           {
             "name": "remaining_borrow",
             "type": "u64"
+          },
+          {
+            "name": "interest_accrued",
+            "type": "u64"
+          },
+          {
+            "name": "reserve_fee",
+            "type": "u64"
           }
         ]
       }
@@ -2388,6 +2565,34 @@
                 ]
               }
             }
+          }
+        ]
+      }
+    },
+    {
+      "name": "WithdrawEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "remaining_collateral",
+            "type": "u64"
+          },
+          {
+            "name": "interest_accrued",
+            "type": "u64"
+          },
+          {
+            "name": "reserve_fee",
+            "type": "u64"
           }
         ]
       }

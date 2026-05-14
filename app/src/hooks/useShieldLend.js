@@ -30,15 +30,29 @@ import {
   waitForComputation,
   randomComputationOffset,
 } from "../lib/arcium";
-import { PROGRAM_ID } from "../lib/constants";
+import { INTEREST_RATE_BPS, LAMPORTS_PER_SOL, PROGRAM_ID } from "../lib/constants";
 
 // Local encrypted state (in-memory for demo — replace with on-chain PDA when available)
 let localPosition = {
   collateralLamports: 0n,
   borrowLamports: 0n,
+  lastUpdateSlot: 0n,
   collateralCipher: null,  // { ciphertext, nonce, privateKey, publicKey, sharedSecret }
   borrowCipher: null,
 };
+
+let localHistory = [];
+
+function addHistory(action, details) {
+  localHistory = [
+    {
+      action,
+      at: new Date().toISOString(),
+      ...details,
+    },
+    ...localHistory,
+  ].slice(0, 10);
+}
 
 function anchorNumberToBigInt(value) {
   if (value === null || value === undefined) return 0n;
@@ -47,6 +61,24 @@ function anchorNumberToBigInt(value) {
   if (typeof value === "string") return BigInt(value);
   if (typeof value.toString === "function") return BigInt(value.toString());
   return 0n;
+}
+
+function estimateDebtWithInterest(borrowLamports, lastUpdateSlot, currentSlot) {
+  if (borrowLamports === 0n || lastUpdateSlot === 0n || currentSlot <= lastUpdateSlot) {
+    return { debtLamports: borrowLamports, interestLamports: 0n, elapsedSlots: 0n };
+  }
+
+  const elapsedSlots = currentSlot - lastUpdateSlot;
+  const slotsPerYear = 78_840_000n;
+  const interestLamports =
+    (borrowLamports * INTEREST_RATE_BPS * elapsedSlots) /
+    (10_000n * slotsPerYear);
+
+  return {
+    debtLamports: borrowLamports + interestLamports,
+    interestLamports,
+    elapsedSlots,
+  };
 }
 
 function waitForProgramEvent(program, eventName, log, timeoutMs = 120_000) {
@@ -140,6 +172,7 @@ export function useShieldLend() {
     if (position) {
       localPosition.collateralLamports = anchorNumberToBigInt(position.collateralLamports);
       localPosition.borrowLamports = anchorNumberToBigInt(position.borrowLamports);
+      localPosition.lastUpdateSlot = anchorNumberToBigInt(position.lastUpdateSlot);
       localPosition.collateralCipher = {
         ciphertext: position.collateralCiphertext,
       };
@@ -150,6 +183,7 @@ export function useShieldLend() {
         position: getPositionAddress(PROGRAM_ID, wallet.publicKey).toBase58(),
         collateralLamports: localPosition.collateralLamports.toString(),
         borrowLamports: localPosition.borrowLamports.toString(),
+        lastUpdateSlot: localPosition.lastUpdateSlot.toString(),
       });
     } else {
       log("No on-chain ShieldLend position PDA found yet", {
@@ -158,6 +192,23 @@ export function useShieldLend() {
     }
     return position;
   }, [wallet.publicKey, log]);
+
+  const estimateCurrentDebt = useCallback(async () => {
+    const currentSlot = BigInt(await connection.getSlot("confirmed"));
+    const estimate = estimateDebtWithInterest(
+      localPosition.borrowLamports,
+      localPosition.lastUpdateSlot,
+      currentSlot
+    );
+    log("Estimated accrued borrow interest from Solana slot clock", {
+      borrowLamports: localPosition.borrowLamports.toString(),
+      debtLamports: estimate.debtLamports.toString(),
+      interestLamports: estimate.interestLamports.toString(),
+      elapsedSlots: estimate.elapsedSlots.toString(),
+      currentSlot: currentSlot.toString(),
+    });
+    return estimate;
+  }, [connection, log]);
 
   // ── Deposit collateral (encrypts + stores locally for demo) ────
   const depositCollateral = useCallback(async (amountSOL) => {
@@ -174,14 +225,21 @@ export function useShieldLend() {
 
       const mxePublicKey = await getMXEKey(program);
       const lamports = BigInt(Math.floor(amountSOL * 1_000_000_000));
+      const debtEstimate = await estimateCurrentDebt();
       const newCollateralLamports = localPosition.collateralLamports + lamports;
 
       setMpcStatus("encrypting");
-      const encrypted = await encryptAmount(newCollateralLamports, mxePublicKey);
+      const encrypted = await encryptValues(
+        [newCollateralLamports, debtEstimate.debtLamports],
+        mxePublicKey
+      );
+      const [encCollateral, encBorrow] = encrypted.ciphertexts;
       log("Encrypted updated collateral total with Arcium RescueCipher", {
         depositLamports: lamports.toString(),
         newCollateralLamports: newCollateralLamports.toString(),
-        ciphertextBytes: encrypted.ciphertext.length,
+        accruedDebtLamports: debtEstimate.debtLamports.toString(),
+        interestLamports: debtEstimate.interestLamports.toString(),
+        collateralCiphertextBytes: encCollateral.length,
         nonce: encrypted.nonce.toString(),
         ephemeralPubkey: Array.from(encrypted.publicKey),
       });
@@ -208,11 +266,16 @@ export function useShieldLend() {
         position: positionAddress.toBase58(),
         vault: vaultAddress.toBase58(),
         depositLamports: lamports.toString(),
-        encryptedCollateralTotal: Array.from(encrypted.ciphertext).slice(0, 8),
+        encryptedCollateralTotal: Array.from(encCollateral).slice(0, 8),
+        encryptedBorrowTotal: Array.from(encBorrow).slice(0, 8),
       });
 
       const tx = await program.methods
-        .depositCollateral(new BN(lamports.toString()), Array.from(encrypted.ciphertext))
+        .depositCollateral(
+          new BN(lamports.toString()),
+          Array.from(encCollateral),
+          Array.from(encBorrow),
+        )
         .accountsPartial({
           depositor: wallet.publicKey,
           protocol: protocolAddress,
@@ -223,7 +286,14 @@ export function useShieldLend() {
         .rpc({ commitment: "confirmed" });
 
       localPosition.collateralLamports = newCollateralLamports;
-      localPosition.collateralCipher = encrypted;
+      localPosition.borrowLamports = debtEstimate.debtLamports;
+      localPosition.collateralCipher = { ...encrypted, ciphertext: encCollateral };
+      localPosition.borrowCipher = { ...encrypted, ciphertext: encBorrow };
+      addHistory("Deposit", {
+        tx,
+        amountSOL,
+        amountLamports: lamports.toString(),
+      });
 
       setMpcStatus("done");
       log("On-chain deposit_collateral confirmed", {
@@ -233,13 +303,14 @@ export function useShieldLend() {
         protocol: protocolAddress.toBase58(),
         depositLamports: lamports.toString(),
         newCollateralLamports: newCollateralLamports.toString(),
+        interestLamports: debtEstimate.interestLamports.toString(),
         availableInstructions: program.idl.instructions.map((ix) => ix.name),
         note: "Program transferred SOL into the vault PDA and updated the user's position PDA.",
       });
       return {
         success: true,
         lamports,
-        ciphertext: encrypted.ciphertext,
+        ciphertext: encCollateral,
         publicKey: encrypted.publicKey,
         tx,
         vault: vaultAddress.toBase58(),
@@ -254,7 +325,7 @@ export function useShieldLend() {
     } finally {
       setLoading(false);
     }
-  }, [wallet, connection, getMXEKey, loadPositionFromChain, log]);
+  }, [wallet, connection, getMXEKey, loadPositionFromChain, estimateCurrentDebt, log]);
 
   // ── Validate borrow via Arcium MPC ────────────────────────────
   const queueBorrowValidation = useCallback(async (borrowSOL) => {
@@ -275,7 +346,8 @@ export function useShieldLend() {
       const mxePublicKey = await getMXEKey(program);
 
       const borrowLamports = BigInt(Math.floor(borrowSOL * 1_000_000_000));
-      const existingBorrow = localPosition.borrowLamports;
+      const debtEstimate = await estimateCurrentDebt();
+      const existingBorrow = debtEstimate.debtLamports;
       const collateral = localPosition.collateralLamports;
 
       const encryptedInput = await encryptValues(
@@ -287,6 +359,7 @@ export function useShieldLend() {
         collateralLamports: collateral.toString(),
         existingBorrowLamports: existingBorrow.toString(),
         requestedBorrowLamports: borrowLamports.toString(),
+        interestLamports: debtEstimate.interestLamports.toString(),
         sharedNonce: encryptedInput.nonce.toString(),
         inputPubkey: Array.from(encryptedInput.publicKey),
       });
@@ -373,7 +446,7 @@ export function useShieldLend() {
     } finally {
       setLoading(false);
     }
-  }, [wallet, getMXEKey, loadPositionFromChain, log]);
+  }, [wallet, getMXEKey, loadPositionFromChain, estimateCurrentDebt, log]);
 
   // ── Finalise borrow payout from the program-controlled vault PDA ─────────
   const finaliseBorrow = useCallback(async (borrowSOL, encRequested) => {
@@ -403,7 +476,8 @@ export function useShieldLend() {
     }
 
     const mxePublicKey = await getMXEKey(program);
-    const newBorrowLamports = localPosition.borrowLamports + lamports;
+    const debtEstimate = await estimateCurrentDebt();
+    const newBorrowLamports = debtEstimate.debtLamports + lamports;
     const encryptedBorrowTotal = await encryptAmount(newBorrowLamports, mxePublicKey);
     const protocolAddress = getProtocolAddress(PROGRAM_ID);
     const positionAddress = getPositionAddress(PROGRAM_ID, wallet.publicKey);
@@ -413,6 +487,7 @@ export function useShieldLend() {
       borrowSOL,
       borrowLamports: lamports.toString(),
       newBorrowLamports: newBorrowLamports.toString(),
+      interestLamports: debtEstimate.interestLamports.toString(),
       vault: vaultAddress.toBase58(),
       protocol: protocolAddress.toBase58(),
       position: positionAddress.toBase58(),
@@ -438,16 +513,22 @@ export function useShieldLend() {
 
     localPosition.borrowLamports = newBorrowLamports;
     localPosition.borrowCipher = encryptedBorrowTotal;
+    addHistory("Borrow", {
+      tx,
+      amountSOL: borrowSOL,
+      amountLamports: lamports.toString(),
+    });
     log("Borrow payout transferred SOL from vault PDA", {
       tx,
       borrowSOL,
       borrowLamports: lamports.toString(),
       newBorrowLamports: newBorrowLamports.toString(),
+      interestLamports: debtEstimate.interestLamports.toString(),
       vault: vaultAddress.toBase58(),
       position: positionAddress.toBase58(),
     });
     return tx;
-  }, [wallet, connection, getMXEKey, loadPositionFromChain, log]);
+  }, [wallet, connection, getMXEKey, loadPositionFromChain, estimateCurrentDebt, log]);
 
   // ── Check liquidatable via Arcium MPC ─────────────────────────
   const checkLiquidatable = useCallback(async (targetAddress) => {
@@ -578,10 +659,11 @@ export function useShieldLend() {
 
       const lamports = BigInt(Math.floor(repaySOL * 1_000_000_000));
       if (lamports <= 0n) throw new Error("Repay amount must be greater than zero");
-      if (lamports > localPosition.borrowLamports) throw new Error("Repay amount exceeds borrow");
+      const debtEstimate = await estimateCurrentDebt();
+      if (lamports > debtEstimate.debtLamports) throw new Error("Repay amount exceeds borrow plus accrued interest");
 
       const mxePublicKey = await getMXEKey(program);
-      const remainingBorrowLamports = localPosition.borrowLamports - lamports;
+      const remainingBorrowLamports = debtEstimate.debtLamports - lamports;
       const encryptedBorrowTotal = await encryptAmount(remainingBorrowLamports, mxePublicKey);
 
       const protocolAddress = getProtocolAddress(PROGRAM_ID);
@@ -592,6 +674,8 @@ export function useShieldLend() {
         repaySOL,
         repayLamports: lamports.toString(),
         remainingBorrowLamports: remainingBorrowLamports.toString(),
+        debtBeforeRepayLamports: debtEstimate.debtLamports.toString(),
+        interestLamports: debtEstimate.interestLamports.toString(),
         protocol: protocolAddress.toBase58(),
         position: positionAddress.toBase58(),
         vault: vaultAddress.toBase58(),
@@ -611,11 +695,17 @@ export function useShieldLend() {
 
       localPosition.borrowLamports = remainingBorrowLamports;
       localPosition.borrowCipher = encryptedBorrowTotal;
+      addHistory("Repay", {
+        tx,
+        amountSOL: repaySOL,
+        amountLamports: lamports.toString(),
+      });
 
       log("Repay confirmed on Solana", {
         tx,
         repayLamports: lamports.toString(),
         remainingBorrowLamports: remainingBorrowLamports.toString(),
+        interestLamports: debtEstimate.interestLamports.toString(),
         position: positionAddress.toBase58(),
         vault: vaultAddress.toBase58(),
       });
@@ -627,17 +717,110 @@ export function useShieldLend() {
     } finally {
       setLoading(false);
     }
-  }, [wallet, getMXEKey, loadPositionFromChain, log]);
+  }, [wallet, getMXEKey, loadPositionFromChain, estimateCurrentDebt, log]);
+
+  // ── Withdraw collateral while preserving the max LTV constraint ─────────
+  const withdrawCollateral = useCallback(async (withdrawSOL) => {
+    if (!wallet.publicKey) throw new Error("Wallet not connected");
+
+    setLoading(true);
+    setLastError(null);
+
+    try {
+      log("Withdraw requested", { withdrawSOL });
+      const { program } = getProgram(wallet);
+      await loadPositionFromChain(program);
+
+      if (!program.methods.withdrawCollateral) {
+        throw new Error("The deployed ShieldLend IDL has no withdraw_collateral instruction yet. Rebuild/redeploy and copy the new IDL.");
+      }
+
+      const lamports = BigInt(Math.floor(withdrawSOL * Number(LAMPORTS_PER_SOL)));
+      if (lamports <= 0n) throw new Error("Withdraw amount must be greater than zero");
+      if (lamports > localPosition.collateralLamports) throw new Error("Withdraw amount exceeds collateral");
+
+      const debtEstimate = await estimateCurrentDebt();
+      const remainingCollateralLamports = localPosition.collateralLamports - lamports;
+
+      const mxePublicKey = await getMXEKey(program);
+      const encrypted = await encryptValues(
+        [remainingCollateralLamports, debtEstimate.debtLamports],
+        mxePublicKey
+      );
+      const [encCollateral, encBorrow] = encrypted.ciphertexts;
+
+      const protocolAddress = getProtocolAddress(PROGRAM_ID);
+      const positionAddress = getPositionAddress(PROGRAM_ID, wallet.publicKey);
+      const vaultAddress = getVaultAddress(PROGRAM_ID);
+
+      log("Requesting wallet signature for on-chain withdraw_collateral", {
+        withdrawSOL,
+        withdrawLamports: lamports.toString(),
+        remainingCollateralLamports: remainingCollateralLamports.toString(),
+        debtLamports: debtEstimate.debtLamports.toString(),
+        interestLamports: debtEstimate.interestLamports.toString(),
+        protocol: protocolAddress.toBase58(),
+        position: positionAddress.toBase58(),
+        vault: vaultAddress.toBase58(),
+        encryptedCollateralPreview: Array.from(encCollateral).slice(0, 8),
+        encryptedBorrowPreview: Array.from(encBorrow).slice(0, 8),
+      });
+
+      const tx = await program.methods
+        .withdrawCollateral(
+          new BN(lamports.toString()),
+          Array.from(encCollateral),
+          Array.from(encBorrow),
+        )
+        .accountsPartial({
+          owner: wallet.publicKey,
+          protocol: protocolAddress,
+          position: positionAddress,
+          vault: vaultAddress,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc({ commitment: "confirmed" });
+
+      localPosition.collateralLamports = remainingCollateralLamports;
+      localPosition.borrowLamports = debtEstimate.debtLamports;
+      localPosition.collateralCipher = { ...encrypted, ciphertext: encCollateral };
+      localPosition.borrowCipher = { ...encrypted, ciphertext: encBorrow };
+      addHistory("Withdraw", {
+        tx,
+        amountSOL: withdrawSOL,
+        amountLamports: lamports.toString(),
+      });
+
+      log("Withdraw confirmed on Solana", {
+        tx,
+        withdrawLamports: lamports.toString(),
+        remainingCollateralLamports: remainingCollateralLamports.toString(),
+        debtLamports: debtEstimate.debtLamports.toString(),
+        position: positionAddress.toBase58(),
+        vault: vaultAddress.toBase58(),
+      });
+      return tx;
+    } catch (err) {
+      log("Withdraw failed", { error: err.message });
+      setLastError(err.message);
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }, [wallet, getMXEKey, loadPositionFromChain, estimateCurrentDebt, log]);
 
   // ── Get local position for display ────────────────────────────
   const getLocalPosition = useCallback(() => ({
     collateralLamports: localPosition.collateralLamports,
     borrowLamports: localPosition.borrowLamports,
+    lastUpdateSlot: localPosition.lastUpdateSlot,
     hasCollateral: localPosition.collateralLamports > 0n,
     hasBorrow: localPosition.borrowLamports > 0n,
     collateralCiphertext: localPosition.collateralCipher?.ciphertext,
     borrowCiphertext: localPosition.borrowCipher?.ciphertext,
   }), []);
+
+  const getRecentActions = useCallback(() => localHistory, []);
 
   return {
     loading,
@@ -649,7 +832,9 @@ export function useShieldLend() {
     finaliseBorrow,
     checkLiquidatable,
     repay,
+    withdrawCollateral,
     getLocalPosition,
+    getRecentActions,
     isIdle: mpcStatus === "idle",
     isRunning: ["encrypting", "queued", "computing", "timeout_warning"].includes(mpcStatus),
     isDone: mpcStatus === "done",

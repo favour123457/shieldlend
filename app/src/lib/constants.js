@@ -10,6 +10,7 @@ export const CLUSTER_OFFSET = 456;
 export const MAX_LTV_BPS = 7500n;        // 75% maximum LTV for borrowing
 export const LIQ_THRESHOLD_BPS = 8000n;  // 80% LTV triggers liquidation
 export const INTEREST_RATE_BPS = 500n;   // 5% annual APR
+export const RESERVE_FEE_BPS = 1000n;    // 10% of accrued interest goes to reserve accounting
 
 // Solana
 export const LAMPORTS_PER_SOL = 1_000_000_000n;

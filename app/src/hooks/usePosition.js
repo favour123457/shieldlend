@@ -9,6 +9,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import { getProgram, fetchPosition, fetchProtocolState } from "../lib/program";
 import { formatCiphertext } from "../lib/arcium";
+import { LIQ_THRESHOLD_BPS, MAX_LTV_BPS } from "../lib/constants";
 
 function anchorNumberToNumber(value) {
   if (value === null || value === undefined) return 0;
@@ -43,11 +44,27 @@ export function usePosition() {
       ]);
 
       if (pos) {
+        const collateralLamports = anchorNumberToNumber(pos.collateralLamports);
+        const borrowLamports = anchorNumberToNumber(pos.borrowLamports);
+        const ltvBps = collateralLamports > 0
+          ? Math.floor((borrowLamports * 10_000) / collateralLamports)
+          : 0;
+        const maxBorrowLamports = Math.floor((collateralLamports * Number(MAX_LTV_BPS)) / 10_000);
+        const availableBorrowLamports = Math.max(0, maxBorrowLamports - borrowLamports);
+        const healthFactor = borrowLamports > 0
+          ? ((collateralLamports * Number(LIQ_THRESHOLD_BPS)) / 10_000) / borrowLamports
+          : Infinity;
+
         setPosition({
           ...pos,
           // Helpers for display
           hasCollateral: pos.collateralCiphertext?.some((b) => b !== 0),
           hasBorrow: pos.borrowCiphertext?.some((b) => b !== 0),
+          collateralLamportsNumber: collateralLamports,
+          borrowLamportsNumber: borrowLamports,
+          ltvBps,
+          availableBorrowLamports,
+          healthFactor,
           collateralHex: formatCiphertext(pos.collateralCiphertext),
           borrowHex: formatCiphertext(pos.borrowCiphertext),
           ownerStr: pos.owner?.toBase58(),
