@@ -37,6 +37,7 @@ let localPosition = {
   collateralLamports: 0n,
   borrowLamports: 0n,
   lastUpdateSlot: 0n,
+  shieldNoteLamports: 0n,
   collateralCipher: null,  // { ciphertext, nonce, privateKey, publicKey, sharedSecret }
   borrowCipher: null,
 };
@@ -181,6 +182,7 @@ export function useShieldLend() {
       localPosition.collateralLamports = anchorNumberToBigInt(position.collateralLamports);
       localPosition.borrowLamports = anchorNumberToBigInt(position.borrowLamports);
       localPosition.lastUpdateSlot = anchorNumberToBigInt(position.lastUpdateSlot);
+      localPosition.shieldNoteLamports = localPosition.collateralLamports;
       localPosition.collateralCipher = {
         ciphertext: position.collateralCiphertext,
       };
@@ -295,12 +297,15 @@ export function useShieldLend() {
 
       localPosition.collateralLamports = newCollateralLamports;
       localPosition.borrowLamports = debtEstimate.debtLamports;
+      localPosition.shieldNoteLamports = newCollateralLamports;
       localPosition.collateralCipher = { ...encrypted, ciphertext: encCollateral };
       localPosition.borrowCipher = { ...encrypted, ciphertext: encBorrow };
       addHistory("Deposit", {
         tx,
         amountSOL,
         amountLamports: lamports.toString(),
+        noteSymbol: "shSOL",
+        noteAmountSOL: amountSOL,
       });
 
       setMpcStatus("done");
@@ -311,19 +316,27 @@ export function useShieldLend() {
         protocol: protocolAddress.toBase58(),
         depositLamports: lamports.toString(),
         newCollateralLamports: newCollateralLamports.toString(),
+        shieldNoteLamports: newCollateralLamports.toString(),
         interestLamports: debtEstimate.interestLamports.toString(),
         availableInstructions: program.idl.instructions.map((ix) => ix.name),
-        note: "Program transferred SOL into the vault PDA and updated the user's position PDA.",
+        note: "Program transferred SOL into the vault PDA and minted an encrypted shSOL receipt note inside the user's position PDA.",
       });
       return {
         success: true,
         lamports,
+        shieldNote: {
+          symbol: "shSOL",
+          amountSOL,
+          totalLamports: newCollateralLamports,
+          backingAsset: "SOL",
+          receiptModel: "Encrypted position PDA receipt",
+        },
         ciphertext: encCollateral,
         publicKey: encrypted.publicKey,
         tx,
         vault: vaultAddress.toBase58(),
         position: positionAddress.toBase58(),
-        note: "Encrypted with Arcium, deposited through ShieldLend, and stored in the user's on-chain position PDA.",
+        note: "Encrypted with Arcium, deposited through ShieldLend, and represented as shSOL inside the user's on-chain position PDA.",
       };
     } catch (err) {
       log("Deposit failed", { error: err.message });
@@ -791,23 +804,37 @@ export function useShieldLend() {
 
       localPosition.collateralLamports = remainingCollateralLamports;
       localPosition.borrowLamports = debtEstimate.debtLamports;
+      localPosition.shieldNoteLamports = remainingCollateralLamports;
       localPosition.collateralCipher = { ...encrypted, ciphertext: encCollateral };
       localPosition.borrowCipher = { ...encrypted, ciphertext: encBorrow };
       addHistory("Withdraw", {
         tx,
         amountSOL: withdrawSOL,
         amountLamports: lamports.toString(),
+        noteSymbol: "shSOL",
+        noteAmountSOL: withdrawSOL,
       });
 
       log("Withdraw confirmed on Solana", {
         tx,
         withdrawLamports: lamports.toString(),
         remainingCollateralLamports: remainingCollateralLamports.toString(),
+        burnedShieldNoteLamports: lamports.toString(),
+        remainingShieldNoteLamports: remainingCollateralLamports.toString(),
         debtLamports: debtEstimate.debtLamports.toString(),
         position: positionAddress.toBase58(),
         vault: vaultAddress.toBase58(),
       });
-      return tx;
+      return {
+        tx,
+        shieldNote: {
+          symbol: "shSOL",
+          burnedAmountSOL: withdrawSOL,
+          remainingLamports: remainingCollateralLamports,
+          backingAsset: "SOL",
+          receiptModel: "Encrypted position PDA receipt",
+        },
+      };
     } catch (err) {
       log("Withdraw failed", { error: err.message });
       setLastError(err.message);
@@ -822,6 +849,7 @@ export function useShieldLend() {
     collateralLamports: localPosition.collateralLamports,
     borrowLamports: localPosition.borrowLamports,
     lastUpdateSlot: localPosition.lastUpdateSlot,
+    shieldNoteLamports: localPosition.shieldNoteLamports,
     hasCollateral: localPosition.collateralLamports > 0n,
     hasBorrow: localPosition.borrowLamports > 0n,
     collateralCiphertext: localPosition.collateralCipher?.ciphertext,

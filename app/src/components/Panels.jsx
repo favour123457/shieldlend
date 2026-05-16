@@ -11,6 +11,7 @@ export function DepositPanel({ onSuccess }) {
   const { publicKey } = useWallet();
   const { depositCollateral } = useShieldLend();
   const [amount, setAmount] = useState("");
+  const [shieldNote, setShieldNote] = useState(null);
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState(null);
@@ -22,6 +23,7 @@ export function DepositPanel({ onSuccess }) {
     try {
       const result = await depositCollateral(Number(amount));
       console.log("[ShieldLend UI] Deposit proof result", result);
+      setShieldNote(result.shieldNote);
       setDone(true);
       onSuccess?.();
     } catch (err) {
@@ -36,8 +38,18 @@ export function DepositPanel({ onSuccess }) {
     <div style={{ textAlign: "center", padding: "40px 0", display: "flex", flexDirection: "column", alignItems: "center", gap: 16 }}>
       <div style={{ width: 56, height: 56, borderRadius: "50%", background: "rgba(0,196,79,0.15)", display: "flex", alignItems: "center", justifyContent: "center", color: "#00c44f" }}><Check size={28} /></div>
       <div style={{ fontSize: 20, fontWeight: 700, color: "#f0fdf4" }}>Deposit Confirmed</div>
-      <div style={{ fontSize: 13, color: "#4d7c5e" }}>{amount} SOL encrypted with Arcium and transferred to the ShieldLend vault PDA on devnet. Check console logs for proof.</div>
-      <GhostBtn onClick={() => { setDone(false); setAmount(""); }}>New Deposit</GhostBtn>
+      <div style={{ fontSize: 13, color: "#4d7c5e" }}>{amount} SOL encrypted with Arcium and transferred to the ShieldLend vault PDA on devnet.</div>
+      <div style={{ width: "100%", maxWidth: 460, padding: "18px 20px", border: "1px solid rgba(0,196,79,0.24)", borderRadius: 12, background: "rgba(0,196,79,0.06)", textAlign: "left" }}>
+        <div style={{ fontSize: 10, color: "#00c44f", letterSpacing: "0.14em", textTransform: "uppercase", fontFamily: "'Space Mono', monospace", marginBottom: 10 }}>Shielded receipt minted</div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 16, alignItems: "baseline" }}>
+          <span style={{ fontSize: 13, color: "#6aa878" }}>Received</span>
+          <span style={{ fontSize: 22, color: "#f0fdf4", fontWeight: 800, fontFamily: "'Space Mono', monospace" }}>{shieldNote?.amountSOL ?? amount} {shieldNote?.symbol || "shSOL"}</span>
+        </div>
+        <div style={{ marginTop: 8, fontSize: 11, color: "#4d7c5e", lineHeight: 1.6 }}>
+          Backed 1:1 by vault SOL and stored as encrypted collateral receipt state in your position PDA.
+        </div>
+      </div>
+      <GhostBtn onClick={() => { setDone(false); setAmount(""); setShieldNote(null); }}>New Deposit</GhostBtn>
     </div>
   );
 
@@ -60,7 +72,7 @@ export function DepositPanel({ onSuccess }) {
         </div>
       </div>
 
-      <PrivacyNotice text="Your deposit is encrypted client-side using x25519 ECDH + RescueCipher before leaving your browser. Only a ciphertext is stored on Solana." />
+      <PrivacyNotice text="Your SOL deposit is encrypted client-side and mints a 1:1 shSOL shielded collateral note inside your position PDA. The receipt backs borrowing without exposing the raw collateral amount in the app flow." />
 
       {!publicKey ? (
         <div style={{ textAlign: "center", padding: "16px", color: "#4d7c5e", fontSize: 13, border: "1px dashed rgba(0,196,79,0.2)", borderRadius: 10 }}>
@@ -228,6 +240,7 @@ export function WithdrawPanel({ position, onSuccess }) {
   const [amount, setAmount] = useState("");
   const [stage, setStage] = useState("idle");
   const [tx, setTx] = useState(null);
+  const [burnedNote, setBurnedNote] = useState(null);
   const [error, setError] = useState(null);
   const hasCollateral = Boolean(position?.collateralLamports && BigInt(position.collateralLamports.toString()) > 0n);
   const availableWithdrawSOL = !position
@@ -242,9 +255,10 @@ export function WithdrawPanel({ position, onSuccess }) {
     setTx(null);
     setStage("withdrawing");
     try {
-      const signature = await withdrawCollateral(Number(amount));
-      console.log("[ShieldLend UI] Withdraw result", { tx: signature, amountSOL: Number(amount) });
-      setTx(signature);
+      const result = await withdrawCollateral(Number(amount));
+      console.log("[ShieldLend UI] Withdraw result", { ...result, amountSOL: Number(amount) });
+      setTx(result.tx);
+      setBurnedNote(result.shieldNote);
       setStage("done");
       onSuccess?.();
     } catch (err) {
@@ -256,7 +270,7 @@ export function WithdrawPanel({ position, onSuccess }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      {stage === "done" && <div style={{ padding: "20px", borderRadius: 12, background: "rgba(0,196,79,0.08)", border: "1px solid rgba(0,196,79,0.4)", textAlign: "center" }}><div style={{ color: "#00c44f", fontSize: 15, fontWeight: 700, marginBottom: 6 }}>Withdraw Confirmed</div><div style={{ color: "#4d7c5e", fontSize: 12, wordBreak: "break-all" }}>{tx}</div></div>}
+      {stage === "done" && <div style={{ padding: "20px", borderRadius: 12, background: "rgba(0,196,79,0.08)", border: "1px solid rgba(0,196,79,0.4)", textAlign: "center" }}><div style={{ color: "#00c44f", fontSize: 15, fontWeight: 700, marginBottom: 6 }}>Withdraw Confirmed</div><div style={{ color: "#6aa878", fontSize: 12, marginBottom: 8 }}>{burnedNote?.burnedAmountSOL ?? amount} {burnedNote?.symbol || "shSOL"} burned to redeem SOL.</div><div style={{ color: "#4d7c5e", fontSize: 12, wordBreak: "break-all" }}>{tx}</div></div>}
       {error && <div style={{ padding: "16px", borderRadius: 10, background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.35)", color: "#ef4444", fontSize: 12, fontFamily: "'Space Mono', monospace" }}>{error}</div>}
       <div>
         <label style={{ display: "block", fontSize: 11, color: "#4d7c5e", letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: 10, fontFamily: "'Space Mono', monospace" }}>Withdraw Amount</label>
@@ -268,7 +282,7 @@ export function WithdrawPanel({ position, onSuccess }) {
           </div>
         )}
       </div>
-      <PrivacyNotice text="Withdrawals are only allowed when the remaining collateral keeps the position inside the max LTV limit." />
+      <PrivacyNotice text="Withdrawals burn the matching shSOL receipt note, redeem SOL from the vault, and are only allowed when the remaining shielded collateral keeps the position inside the max LTV limit." />
       {!publicKey ? <div style={{ textAlign: "center", padding: "16px", color: "#4d7c5e", fontSize: 13, border: "1px dashed rgba(0,196,79,0.2)", borderRadius: 10 }}>Connect your wallet to withdraw</div> : (
         <PrimaryBtn onClick={handleWithdraw} disabled={!amount || Number(amount) <= 0 || stage === "withdrawing" || !hasCollateral} loading={stage === "withdrawing"}>Withdraw Collateral</PrimaryBtn>
       )}

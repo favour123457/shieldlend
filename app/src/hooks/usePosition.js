@@ -61,6 +61,8 @@ export function usePosition() {
           hasCollateral: pos.collateralCiphertext?.some((b) => b !== 0),
           hasBorrow: pos.borrowCiphertext?.some((b) => b !== 0),
           collateralLamportsNumber: collateralLamports,
+          shieldNoteLamportsNumber: collateralLamports,
+          shieldNoteSymbol: "shSOL",
           borrowLamportsNumber: borrowLamports,
           ltvBps,
           availableBorrowLamports,

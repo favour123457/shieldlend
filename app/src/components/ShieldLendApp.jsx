@@ -37,6 +37,7 @@ export default function ShieldLendApp() {
   const positionRows = position
     ? [
         ["Collateral", formatSOL(position.collateralLamports)],
+        ["Receipt Note", `${formatSOL(position.collateralLamports).replace(" SOL", "")} shSOL`],
         ["Borrow", formatSOL(position.borrowLamports)],
         ["Available", formatSOL(position.availableBorrowLamports)],
         ["LTV", `${(position.ltvBps / 100).toFixed(2)}%`],
@@ -44,7 +45,17 @@ export default function ShieldLendApp() {
         ["Last Slot", position.lastUpdateSlot?.toString?.() || "-"],
         ["Status", healthLabel],
       ]
-    : [["Collateral", "-"], ["Borrow", "-"], ["Available", "-"], ["LTV", "-"], ["Health", "-"], ["Last Slot", "-"], ["Status", "-"]];
+    : [["Collateral", "-"], ["Receipt Note", "-"], ["Borrow", "-"], ["Available", "-"], ["LTV", "-"], ["Health", "-"], ["Last Slot", "-"], ["Status", "-"]];
+
+  const shieldedAssetRows = position
+    ? [
+        ["Asset", "shSOL"],
+        ["Balance", `${formatSOL(position.collateralLamports).replace(" SOL", "")} shSOL`],
+        ["Backing", `${formatSOL(position.collateralLamports)} vault collateral`],
+        ["Model", "Encrypted PDA receipt"],
+        ["Redeem", position.borrowLamportsNumber === 0 ? "Unlocked" : "Health-gated"],
+      ]
+    : [["Asset", "shSOL"], ["Balance", "-"], ["Backing", "1:1 SOL"], ["Model", "Encrypted PDA receipt"], ["Redeem", "-"]];
 
   const protocolRows = [
     ["Total Deposits", protocolState ? `${protocolState.totalDepositsSOL.toFixed(4)} SOL` : "-"],
@@ -56,9 +67,9 @@ export default function ShieldLendApp() {
 
   const protocolSummary = [
     {
-      label: "Private Collateral",
-      value: position ? formatSOL(position.collateralLamports) : "-",
-      caption: "Encrypted position PDA",
+      label: "Shielded Notes",
+      value: position ? `${formatSOL(position.collateralLamports).replace(" SOL", "")} shSOL` : "-",
+      caption: "1:1 receipt for vault SOL",
     },
     {
       label: "Borrow Capacity",
@@ -154,6 +165,7 @@ export default function ShieldLendApp() {
                 positionRows={positionRows}
                 protocolRows={protocolRows}
                 recentActions={recentActions}
+                shieldedAssetRows={shieldedAssetRows}
               />
             </div>
           </div>
@@ -230,7 +242,7 @@ function Hero({ onLaunch }) {
         </h1>
 
         <p style={{ fontSize: 20, color: "#6aa878", lineHeight: 1.75, maxWidth: 660, marginBottom: 48 }}>
-          Deposit devnet SOL into a program-controlled vault, borrow against it, repay with slot-based interest,
+          Deposit devnet SOL into a program-controlled vault, mint shielded shSOL collateral notes, borrow against them, repay with slot-based interest,
           and keep sensitive position checks moving through <strong style={{ color: "#86efac" }}>Arcium MPC</strong>.
         </p>
 
@@ -250,7 +262,7 @@ function Hero({ onLaunch }) {
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16, marginBottom: 80 }}>
-          <StatCard value="Live" label="Private Checks" sub="Borrowing and health checks stay confidential" accent />
+          <StatCard value="shSOL" label="Shielded Notes" sub="Private collateral receipts backed 1:1 by SOL" accent />
           <StatCard value="75%" label="Max LTV" sub="Liq. threshold: 80%" />
           <StatCard value="5%" label="Borrow APR" sub="Fixed rate, private interest calc." />
           <StatCard value="4" label="Recovery Nodes" sub="Cluster offset 456 · Arcium devnet" />
@@ -263,9 +275,9 @@ function Hero({ onLaunch }) {
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 20 }}>
             {[
               { step: "01", title: "Encrypt Client-Side", body: "Your collateral and borrow amounts are encrypted in your browser before sensitive checks run." },
-              { step: "02", title: "Store Ciphertext On-Chain", body: "Only encrypted snapshots are written to Solana alongside the vault accounting needed for devnet testing." },
+              { step: "02", title: "Mint shSOL Notes", body: "Every SOL deposit creates a 1:1 shielded collateral receipt inside your encrypted position PDA." },
               { step: "03", title: "Compute Privately", body: "Borrow limits, interest, and health checks can run without exposing the user-facing position details." },
-              { step: "04", title: "Move Real Devnet SOL", body: "Deposits, borrows, repayments, and withdrawals all interact with the ShieldLend vault PDA." },
+              { step: "04", title: "Burn To Redeem", body: "Withdrawals burn shSOL notes before releasing real devnet SOL from the ShieldLend vault PDA." },
             ].map(({ step, title, body }) => (
               <div key={step} style={{
                 padding: "28px 24px",
@@ -307,8 +319,8 @@ function LiveDeskSummary({ protocolSummary }) {
             Private credit controls, visible wallet proof.
           </h2>
           <p style={{ fontSize: 16, lineHeight: 1.7, color: "#6aa878", maxWidth: 560, margin: 0 }}>
-            Use the tabs below to move SOL through the ShieldLend vault PDA. The app reads your devnet wallet balance,
-            tracks your encrypted position account, and logs every Solana/Arcium step in the console.
+            Use the tabs below to move SOL through the ShieldLend vault PDA. Deposits issue shSOL shielded notes,
+            borrowing is checked against those notes, and every Solana/Arcium step is logged in the console.
           </p>
         </div>
       </div>
@@ -338,7 +350,7 @@ function LiveDeskSummary({ protocolSummary }) {
   );
 }
 
-function Sidebar({ connected, position, positionRows, protocolRows, recentActions }) {
+function Sidebar({ connected, position, positionRows, protocolRows, recentActions, shieldedAssetRows }) {
   return (
     <aside style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <InfoCard title="My Position" badge="ENCRYPTED">
@@ -355,6 +367,23 @@ function Sidebar({ connected, position, positionRows, protocolRows, recentAction
                   <span style={{ fontSize: 12, color: "#86efac", fontFamily: "'Space Mono', monospace" }}>{v}</span>
                   {k === "Collateral" && position?.collateralHex !== "-" && <WalletIcon size={10} />}
                 </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </InfoCard>
+
+      <InfoCard title="Shielded Assets" badge="shSOL">
+        {!connected ? (
+          <div style={{ padding: "24px", color: "#4d7c5e", fontSize: 12 }}>
+            Connect wallet to view receipt notes
+          </div>
+        ) : (
+          <div style={{ padding: "16px 24px", display: "flex", flexDirection: "column", gap: 12 }}>
+            {shieldedAssetRows.map(([k, v]) => (
+              <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 14 }}>
+                <span style={{ fontSize: 12, color: "#4d7c5e" }}>{k}</span>
+                <span style={{ fontSize: 12, color: "#86efac", fontFamily: "'Space Mono', monospace", textAlign: "right" }}>{v}</span>
               </div>
             ))}
           </div>
@@ -382,6 +411,11 @@ function Sidebar({ connected, position, positionRows, protocolRows, recentAction
                 <span style={{ fontSize: 11, color: "#86efac", fontFamily: "'Space Mono', monospace" }}>{item.action}</span>
                 <span style={{ fontSize: 11, color: "#4d7c5e", fontFamily: "'Space Mono', monospace" }}>{item.amountSOL} SOL</span>
               </div>
+              {item.noteSymbol && (
+                <div style={{ fontSize: 10, color: "#00c44f", fontFamily: "'Space Mono', monospace", marginBottom: 4 }}>
+                  {item.action === "Withdraw" ? "Burned" : "Minted"} {item.noteAmountSOL} {item.noteSymbol}
+                </div>
+              )}
               <div style={{ fontSize: 10, color: "#2d4a35", fontFamily: "'Space Mono', monospace", overflow: "hidden", textOverflow: "ellipsis" }}>
                 {item.tx}
               </div>
