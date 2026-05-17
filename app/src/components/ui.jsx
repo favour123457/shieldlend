@@ -4,7 +4,7 @@ import { Lock, WalletIcon } from "./Icons";
 
 export function StatCard({ value, label, sub, accent = false }) {
   return (
-    <div style={{
+    <div className="stat-card" style={{
       background: "rgba(0,196,79,0.04)",
       border: "1px solid rgba(0,196,79,0.15)",
       borderRadius: 12,
@@ -48,6 +48,7 @@ export function WalletBalancePill() {
 
   return (
     <button
+      className="wallet-balance-pill"
       onClick={() => refreshBalance().catch(() => setBalanceSOL(null))}
       style={{
         display: "flex",
@@ -77,7 +78,7 @@ export function WalletBalancePill() {
 
 export function AmountInput({ value, onChange, disabled, placeholder = "0.000" }) {
   return (
-    <div style={{ position: "relative" }}>
+    <div className="amount-input-wrap" style={{ position: "relative" }}>
       <input
         type="number"
         value={value}
@@ -109,6 +110,7 @@ export function AmountInput({ value, onChange, disabled, placeholder = "0.000" }
 export function PrimaryBtn({ children, onClick, disabled, loading }) {
   return (
     <button
+      className="primary-btn"
       onClick={onClick}
       disabled={disabled || loading}
       style={{
@@ -134,6 +136,7 @@ export function PrimaryBtn({ children, onClick, disabled, loading }) {
 export function GhostBtn({ children, onClick, active }) {
   return (
     <button
+      className="ghost-btn"
       onClick={onClick}
       style={{
         padding: "12px 24px",
@@ -155,7 +158,7 @@ export function GhostBtn({ children, onClick, active }) {
 
 export function PrivacyNotice({ text }) {
   return (
-    <div style={{
+    <div className="privacy-notice" style={{
       display: "flex", gap: 12, alignItems: "flex-start",
       padding: "14px 16px",
       background: "rgba(0,196,79,0.04)",

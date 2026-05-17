@@ -60,7 +60,7 @@ export function DepositPanel({ onSuccess }) {
           Collateral Amount
         </label>
         <AmountInput value={amount} onChange={setAmount} disabled={loading} />
-        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+        <div className="quick-amount-row" style={{ display: "flex", gap: 8, marginTop: 10 }}>
           {["0.1", "0.5", "1.0", "2.0"].map(v => (
             <button key={v} onClick={() => setAmount(v)} style={{
               padding: "6px 14px", background: "transparent",
@@ -148,14 +148,14 @@ export function BorrowPanel({ position, onSuccess }) {
         </label>
         <AmountInput value={amount} onChange={setAmount} disabled={stage === "validating"} />
         {position && (
-          <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center", justifyContent: "space-between" }}>
+          <div className="amount-meta-row" style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center", justifyContent: "space-between" }}>
             <span style={{ fontSize: 11, color: "#4d7c5e", fontFamily: "'Space Mono', monospace" }}>Available: {availableBorrowSOL.toFixed(4)} SOL</span>
             <button onClick={() => setAmount(availableBorrowSOL.toFixed(4))} style={{ padding: "6px 14px", background: "transparent", border: "1px solid rgba(0,196,79,0.2)", borderRadius: 6, color: "#86efac", fontSize: 11, cursor: "pointer", fontFamily: "'Space Mono', monospace" }}>Max</button>
           </div>
         )}
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+      <div className="metrics-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         {[
           ["Max LTV", `${Number(MAX_LTV_BPS) / 100}%`],
           ["Liq. Threshold", `${Number(LIQ_THRESHOLD_BPS) / 100}%`],
@@ -219,7 +219,7 @@ export function RepayPanel({ position, onSuccess }) {
         <label style={{ display: "block", fontSize: 11, color: "#4d7c5e", letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: 10, fontFamily: "'Space Mono', monospace" }}>Repay Amount</label>
         <AmountInput value={amount} onChange={setAmount} disabled={stage === "repaying" || !hasBorrow} />
         {hasBorrow && (
-          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <div className="quick-amount-row" style={{ display: "flex", gap: 8, marginTop: 10 }}>
             {[["25%", 0.25], ["50%", 0.5], ["100%", 1]].map(([label, pct]) => (
               <button key={label} onClick={() => setAmount((borrowSOL * pct).toFixed(4))} style={{ padding: "6px 14px", background: "transparent", border: "1px solid rgba(0,196,79,0.2)", borderRadius: 6, color: "#4d7c5e", fontSize: 11, cursor: "pointer", fontFamily: "'Space Mono', monospace" }}>{label}</button>
             ))}
@@ -276,7 +276,7 @@ export function WithdrawPanel({ position, onSuccess }) {
         <label style={{ display: "block", fontSize: 11, color: "#4d7c5e", letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: 10, fontFamily: "'Space Mono', monospace" }}>Withdraw Amount</label>
         <AmountInput value={amount} onChange={setAmount} disabled={stage === "withdrawing" || !hasCollateral} />
         {hasCollateral && (
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 10 }}>
+          <div className="amount-meta-row" style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 10 }}>
             <span style={{ fontSize: 11, color: "#4d7c5e", fontFamily: "'Space Mono', monospace" }}>Available: {availableWithdrawSOL.toFixed(4)} SOL</span>
             <button onClick={() => setAmount(availableWithdrawSOL.toFixed(4))} style={{ padding: "6px 14px", background: "transparent", border: "1px solid rgba(0,196,79,0.2)", borderRadius: 6, color: "#86efac", fontSize: 11, cursor: "pointer", fontFamily: "'Space Mono', monospace" }}>Max</button>
           </div>
