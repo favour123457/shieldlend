@@ -15,6 +15,8 @@ export default function ShieldLendApp() {
   const [recentActions, setRecentActions] = useState([]);
   const [activeTab, setActiveTab] = useState("deposit");
   const [showApp, setShowApp] = useState(false);
+  const shieldNoteBalance = position?.shieldNoteLamportsNumber ?? position?.collateralLamports;
+  const shieldNoteLabel = position ? `${formatSOL(shieldNoteBalance).replace(" SOL", "")} shSOL` : "-";
 
   useEffect(() => subscribeToShieldLendHistory(setRecentActions), []);
 
@@ -37,7 +39,7 @@ export default function ShieldLendApp() {
   const positionRows = position
     ? [
         ["Collateral", formatSOL(position.collateralLamports)],
-        ["Receipt Note", `${formatSOL(position.collateralLamports).replace(" SOL", "")} shSOL`],
+        ["Receipt Note", shieldNoteLabel],
         ["Borrow", formatSOL(position.borrowLamports)],
         ["Available", formatSOL(position.availableBorrowLamports)],
         ["LTV", `${(position.ltvBps / 100).toFixed(2)}%`],
@@ -50,12 +52,13 @@ export default function ShieldLendApp() {
   const shieldedAssetRows = position
     ? [
         ["Asset", "shSOL"],
-        ["Balance", `${formatSOL(position.collateralLamports).replace(" SOL", "")} shSOL`],
+        ["Balance", shieldNoteLabel],
         ["Backing", `${formatSOL(position.collateralLamports)} vault collateral`],
-        ["Model", "Encrypted PDA receipt"],
+        ["Model", "SPL receipt + encrypted PDA"],
         ["Redeem", position.borrowLamportsNumber === 0 ? "Unlocked" : "Health-gated"],
+        ["Mint", position.shieldNoteMint ? `${position.shieldNoteMint.slice(0, 4)}...${position.shieldNoteMint.slice(-4)}` : "-"],
       ]
-    : [["Asset", "shSOL"], ["Balance", "-"], ["Backing", "1:1 SOL"], ["Model", "Encrypted PDA receipt"], ["Redeem", "-"]];
+    : [["Asset", "shSOL"], ["Balance", "-"], ["Backing", "1:1 SOL"], ["Model", "SPL receipt + encrypted PDA"], ["Redeem", "-"], ["Mint", "-"]];
 
   const protocolRows = [
     ["Total Deposits", protocolState ? `${protocolState.totalDepositsSOL.toFixed(4)} SOL` : "-"],
@@ -68,8 +71,8 @@ export default function ShieldLendApp() {
   const protocolSummary = [
     {
       label: "Shielded Notes",
-      value: position ? `${formatSOL(position.collateralLamports).replace(" SOL", "")} shSOL` : "-",
-      caption: "1:1 receipt for vault SOL",
+      value: shieldNoteLabel,
+      caption: "SPL receipt for vault SOL",
     },
     {
       label: "Borrow Capacity",

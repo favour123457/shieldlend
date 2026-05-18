@@ -7,9 +7,15 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
-import { getProgram, fetchPosition, fetchProtocolState } from "../lib/program";
+import {
+  getProgram,
+  fetchPosition,
+  fetchProtocolState,
+  getAssociatedTokenAddress,
+  getShsolMintAddress,
+} from "../lib/program";
 import { formatCiphertext } from "../lib/arcium";
-import { LIQ_THRESHOLD_BPS, MAX_LTV_BPS } from "../lib/constants";
+import { LIQ_THRESHOLD_BPS, MAX_LTV_BPS, PROGRAM_ID } from "../lib/constants";
 
 function anchorNumberToNumber(value) {
   if (value === null || value === undefined) return 0;
@@ -18,7 +24,7 @@ function anchorNumberToNumber(value) {
 }
 
 export function usePosition() {
-  useConnection();
+  const { connection } = useConnection();
   const wallet = useWallet();
 
   const [position, setPosition] = useState(null);
@@ -37,11 +43,21 @@ export function usePosition() {
 
     try {
       const { program } = getProgram(wallet);
+      const shsolMint = getShsolMintAddress(PROGRAM_ID);
+      const shsolAccount = getAssociatedTokenAddress(wallet.publicKey, shsolMint);
 
       const [pos, proto] = await Promise.all([
         fetchPosition(program, wallet.publicKey),
         fetchProtocolState(program),
       ]);
+
+      let shsolTokenBalance = null;
+      try {
+        const tokenBalance = await connection.getTokenAccountBalance(shsolAccount, "confirmed");
+        shsolTokenBalance = Number(tokenBalance.value.amount);
+      } catch {
+        shsolTokenBalance = null;
+      }
 
       if (pos) {
         const collateralLamports = anchorNumberToNumber(pos.collateralLamports);
@@ -61,8 +77,10 @@ export function usePosition() {
           hasCollateral: pos.collateralCiphertext?.some((b) => b !== 0),
           hasBorrow: pos.borrowCiphertext?.some((b) => b !== 0),
           collateralLamportsNumber: collateralLamports,
-          shieldNoteLamportsNumber: collateralLamports,
+          shieldNoteLamportsNumber: shsolTokenBalance ?? collateralLamports,
           shieldNoteSymbol: "shSOL",
+          shieldNoteMint: shsolMint.toBase58(),
+          shieldNoteAccount: shsolAccount.toBase58(),
           borrowLamportsNumber: borrowLamports,
           ltvBps,
           availableBorrowLamports,
@@ -87,7 +105,7 @@ export function usePosition() {
     } finally {
       setLoading(false);
     }
-  }, [wallet]);
+  }, [wallet, connection]);
 
   // Fetch on wallet connect
   useEffect(() => {

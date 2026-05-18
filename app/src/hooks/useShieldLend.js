@@ -18,9 +18,13 @@ import {
   getArciumAccounts,
   getCompDefAddress,
   getVaultAddress,
+  getShsolMintAddress,
+  getAssociatedTokenAddress,
   getProtocolAddress,
   getPositionAddress,
   fetchPosition,
+  TOKEN_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
 } from "../lib/program";
 import {
   encryptAmount,
@@ -269,12 +273,16 @@ export function useShieldLend() {
 
       const protocolAddress = getProtocolAddress(PROGRAM_ID);
       const positionAddress = getPositionAddress(PROGRAM_ID, wallet.publicKey);
+      const shsolMintAddress = getShsolMintAddress(PROGRAM_ID);
+      const depositorShsolAccount = getAssociatedTokenAddress(wallet.publicKey, shsolMintAddress);
 
       log("Requesting wallet signature for on-chain deposit_collateral", {
         depositor: wallet.publicKey.toBase58(),
         protocol: protocolAddress.toBase58(),
         position: positionAddress.toBase58(),
         vault: vaultAddress.toBase58(),
+        shsolMint: shsolMintAddress.toBase58(),
+        depositorShsolAccount: depositorShsolAccount.toBase58(),
         depositLamports: lamports.toString(),
         encryptedCollateralTotal: Array.from(encCollateral).slice(0, 8),
         encryptedBorrowTotal: Array.from(encBorrow).slice(0, 8),
@@ -291,6 +299,10 @@ export function useShieldLend() {
           protocol: protocolAddress,
           position: positionAddress,
           vault: vaultAddress,
+          shsolMint: shsolMintAddress,
+          depositorShsolAccount,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
         .rpc({ commitment: "confirmed" });
@@ -314,6 +326,8 @@ export function useShieldLend() {
         vault: vaultAddress.toBase58(),
         position: positionAddress.toBase58(),
         protocol: protocolAddress.toBase58(),
+        shsolMint: shsolMintAddress.toBase58(),
+        depositorShsolAccount: depositorShsolAccount.toBase58(),
         depositLamports: lamports.toString(),
         newCollateralLamports: newCollateralLamports.toString(),
         shieldNoteLamports: newCollateralLamports.toString(),
@@ -336,6 +350,8 @@ export function useShieldLend() {
         tx,
         vault: vaultAddress.toBase58(),
         position: positionAddress.toBase58(),
+        shsolMint: shsolMintAddress.toBase58(),
+        shsolAccount: depositorShsolAccount.toBase58(),
         note: "Encrypted with Arcium, deposited through ShieldLend, and represented as shSOL inside the user's on-chain position PDA.",
       };
     } catch (err) {
@@ -773,6 +789,8 @@ export function useShieldLend() {
       const protocolAddress = getProtocolAddress(PROGRAM_ID);
       const positionAddress = getPositionAddress(PROGRAM_ID, wallet.publicKey);
       const vaultAddress = getVaultAddress(PROGRAM_ID);
+      const shsolMintAddress = getShsolMintAddress(PROGRAM_ID);
+      const ownerShsolAccount = getAssociatedTokenAddress(wallet.publicKey, shsolMintAddress);
 
       log("Requesting wallet signature for on-chain withdraw_collateral", {
         withdrawSOL,
@@ -783,6 +801,8 @@ export function useShieldLend() {
         protocol: protocolAddress.toBase58(),
         position: positionAddress.toBase58(),
         vault: vaultAddress.toBase58(),
+        shsolMint: shsolMintAddress.toBase58(),
+        ownerShsolAccount: ownerShsolAccount.toBase58(),
         encryptedCollateralPreview: Array.from(encCollateral).slice(0, 8),
         encryptedBorrowPreview: Array.from(encBorrow).slice(0, 8),
       });
@@ -798,6 +818,9 @@ export function useShieldLend() {
           protocol: protocolAddress,
           position: positionAddress,
           vault: vaultAddress,
+          shsolMint: shsolMintAddress,
+          ownerShsolAccount,
+          tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
         .rpc({ commitment: "confirmed" });
@@ -824,6 +847,8 @@ export function useShieldLend() {
         debtLamports: debtEstimate.debtLamports.toString(),
         position: positionAddress.toBase58(),
         vault: vaultAddress.toBase58(),
+        shsolMint: shsolMintAddress.toBase58(),
+        ownerShsolAccount: ownerShsolAccount.toBase58(),
       });
       return {
         tx,

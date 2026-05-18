@@ -3,6 +3,10 @@ use anchor_lang::solana_program::{
     program::{invoke, invoke_signed},
     system_instruction,
 };
+use anchor_spl::{
+    associated_token::AssociatedToken,
+    token::{self, Burn, Mint, MintTo, Token, TokenAccount},
+};
 use arcium_anchor::prelude::*;
 use arcium_client::idl::arcium::types::CircuitSource;
 use arcium_client::idl::arcium::types::OffChainCircuitSource;
@@ -216,6 +220,21 @@ pub mod shieldlend {
             ],
         )?;
 
+        let vault_bump = ctx.bumps.vault;
+        let mint_authority_seeds: &[&[u8]] = &[b"vault", &[vault_bump]];
+        token::mint_to(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                MintTo {
+                    mint: ctx.accounts.shsol_mint.to_account_info(),
+                    to: ctx.accounts.depositor_shsol_account.to_account_info(),
+                    authority: ctx.accounts.vault.to_account_info(),
+                },
+                &[mint_authority_seeds],
+            ),
+            amount,
+        )?;
+
         position.collateral_lamports = position
             .collateral_lamports
             .checked_add(amount)
@@ -232,6 +251,8 @@ pub mod shieldlend {
             depositor: ctx.accounts.depositor.key(),
             amount,
             vault: ctx.accounts.vault.key(),
+            shsol_mint: ctx.accounts.shsol_mint.key(),
+            shsol_amount: amount,
             interest_accrued,
             reserve_fee,
         });
@@ -386,6 +407,18 @@ pub mod shieldlend {
         let vault_lamports = ctx.accounts.vault.to_account_info().lamports();
         require!(vault_lamports >= amount, ErrorCode::VaultInsufficientFunds);
 
+        token::burn(
+            CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Burn {
+                    mint: ctx.accounts.shsol_mint.to_account_info(),
+                    from: ctx.accounts.owner_shsol_account.to_account_info(),
+                    authority: ctx.accounts.owner.to_account_info(),
+                },
+            ),
+            amount,
+        )?;
+
         let vault_bump = ctx.bumps.vault;
         let signer_seeds: &[&[u8]] = &[b"vault", &[vault_bump]];
 
@@ -412,6 +445,8 @@ pub mod shieldlend {
             owner: ctx.accounts.owner.key(),
             amount,
             remaining_collateral,
+            shsol_mint: ctx.accounts.shsol_mint.key(),
+            burned_shsol_amount: amount,
             interest_accrued,
             reserve_fee,
         });
@@ -772,9 +807,29 @@ pub struct DepositCollateral<'info> {
         seeds = [b"vault"],
         bump,
     )]
-    /// CHECK: vault PDA holds SOL only and is controlled by program seeds.
+    /// CHECK: vault PDA holds SOL and signs shSOL mint authority CPIs.
     pub vault: UncheckedAccount<'info>,
 
+    #[account(
+        init_if_needed,
+        payer = depositor,
+        seeds = [b"shsol_mint"],
+        bump,
+        mint::decimals = 9,
+        mint::authority = vault,
+    )]
+    pub shsol_mint: Account<'info, Mint>,
+
+    #[account(
+        init_if_needed,
+        payer = depositor,
+        associated_token::mint = shsol_mint,
+        associated_token::authority = depositor,
+    )]
+    pub depositor_shsol_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
 }
 
@@ -802,7 +857,7 @@ pub struct BorrowPayout<'info> {
         seeds = [b"vault"],
         bump,
     )]
-    /// CHECK: vault PDA holds SOL only and is controlled by program seeds.
+    /// CHECK: vault PDA holds SOL and signs program-owned transfers.
     pub vault: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
@@ -832,7 +887,7 @@ pub struct Repay<'info> {
         seeds = [b"vault"],
         bump,
     )]
-    /// CHECK: vault PDA holds SOL only and is controlled by program seeds.
+    /// CHECK: vault PDA holds SOL and signs program-owned transfers.
     pub vault: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
@@ -862,9 +917,24 @@ pub struct WithdrawCollateral<'info> {
         seeds = [b"vault"],
         bump,
     )]
-    /// CHECK: vault PDA holds SOL only and is controlled by program seeds.
+    /// CHECK: vault PDA holds SOL and signs program-owned transfers.
     pub vault: UncheckedAccount<'info>,
 
+    #[account(
+        mut,
+        seeds = [b"shsol_mint"],
+        bump,
+    )]
+    pub shsol_mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        associated_token::mint = shsol_mint,
+        associated_token::authority = owner,
+    )]
+    pub owner_shsol_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
 
@@ -968,6 +1038,8 @@ pub struct DepositEvent {
     pub depositor: Pubkey,
     pub amount: u64,
     pub vault: Pubkey,
+    pub shsol_mint: Pubkey,
+    pub shsol_amount: u64,
     pub interest_accrued: u64,
     pub reserve_fee: u64,
 }
@@ -995,6 +1067,8 @@ pub struct WithdrawEvent {
     pub owner: Pubkey,
     pub amount: u64,
     pub remaining_collateral: u64,
+    pub shsol_mint: Pubkey,
+    pub burned_shsol_amount: u64,
     pub interest_accrued: u64,
     pub reserve_fee: u64,
 }
